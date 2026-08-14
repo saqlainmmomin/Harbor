@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+/* MVP is light-mode only — dark mode is a v2 item, so there is deliberately
+   no prefers-color-scheme block here. */
+
+@theme inline {
+  --font-sans: var(--font-inter);
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background: #f8fafc; /* slate-50 */
+  color: #0f172a; /* slate-900 */
+}
