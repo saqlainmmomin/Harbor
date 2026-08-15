@@ -65,6 +65,14 @@ export interface AiExcerpt {
   text: string;
 }
 
+export type ConfidenceLabel = "strong_match" | "partial_match" | "weak_match";
+
+export interface SuggestedControl {
+  control_name: string;
+  confidence_label: ConfidenceLabel;
+  rationale: string;
+}
+
 export interface AiReview {
   id: string;
   evidence_file_id: string;
@@ -75,6 +83,11 @@ export interface AiReview {
   summary: string;
   completeness: CompletenessLabel;
   suggested_control_refs: string[];
+  /** Present when sourced from the real API (apps/api) — richer than
+   * suggested_control_refs, carries confidence + rationale per control.
+   * Mock data doesn't set this; the UI falls back to suggested_control_refs
+   * when it's absent. */
+  suggested_controls?: SuggestedControl[];
   flags: AiFlag[];
   excerpts: AiExcerpt[];
 }

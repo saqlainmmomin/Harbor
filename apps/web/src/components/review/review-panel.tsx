@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CompletenessBadge, severityStyle } from "@/components/badges";
+import { CompletenessBadge, confidenceStyle, severityStyle } from "@/components/badges";
 import { DECISION_LABEL, formatBytes, formatDateTime, relativeTime } from "@/lib/format";
 import type {
   ActivityEntry,
@@ -151,34 +151,84 @@ export function ReviewPanel({
               </Field>
 
               <Field label="Suggested control mapping">
-                <div className="flex flex-wrap items-center gap-2">
-                  {review.suggested_control_refs.map((ref) => {
-                    const on = mappedControls.includes(ref);
-                    return (
-                      <button
-                        key={ref}
-                        onClick={() =>
-                          setMappedControls((prev) =>
-                            on ? prev.filter((c) => c !== ref) : [...prev, ref],
-                          )
-                        }
-                        className={`rounded-full px-2.5 py-1 font-mono text-xs font-medium ring-1 ring-inset transition ${
-                          on
-                            ? "bg-slate-900 text-white ring-slate-900"
-                            : "bg-white text-slate-500 ring-slate-300 hover:bg-slate-50"
-                        }`}
-                      >
-                        {on ? "✓ " : "+ "}
-                        {ref}
-                      </button>
-                    );
-                  })}
-                  <span className="text-xs text-slate-500">
-                    {mappedControls.length === 0
-                      ? "No controls mapped"
-                      : `Mapped to ${mappedControls.join(", ")}`}
-                  </span>
-                </div>
+                {review.suggested_controls && review.suggested_controls.length > 0 ? (
+                  // Real API path — each suggestion carries a confidence
+                  // label and rationale the model gave for it, so this
+                  // renders one row per control instead of a bare chip.
+                  <div className="space-y-2">
+                    {review.suggested_controls.map((c, i) => {
+                      const on = mappedControls.includes(c.control_name);
+                      const cs = confidenceStyle(c.confidence_label);
+                      return (
+                        <div
+                          key={`${c.control_name}-${i}`}
+                          className="flex flex-wrap items-start gap-2 rounded-md border border-slate-200 p-2.5"
+                        >
+                          <button
+                            onClick={() =>
+                              setMappedControls((prev) =>
+                                on
+                                  ? prev.filter((x) => x !== c.control_name)
+                                  : [...prev, c.control_name],
+                              )
+                            }
+                            className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset transition ${
+                              on
+                                ? "bg-slate-900 text-white ring-slate-900"
+                                : "bg-white text-slate-700 ring-slate-300 hover:bg-slate-50"
+                            }`}
+                          >
+                            {on ? "✓ " : "+ "}
+                            {c.control_name}
+                          </button>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset whitespace-nowrap ${cs.chip}`}
+                          >
+                            {cs.label}
+                          </span>
+                          <span className="w-full text-xs text-slate-500 sm:w-auto sm:flex-1">
+                            {c.rationale}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    <p className="text-xs text-slate-500">
+                      {mappedControls.length === 0
+                        ? "No controls mapped"
+                        : `Mapped to ${mappedControls.join(", ")}`}
+                    </p>
+                  </div>
+                ) : (
+                  // Mock-data path — unchanged from the original mockup.
+                  <div className="flex flex-wrap items-center gap-2">
+                    {review.suggested_control_refs.map((ref) => {
+                      const on = mappedControls.includes(ref);
+                      return (
+                        <button
+                          key={ref}
+                          onClick={() =>
+                            setMappedControls((prev) =>
+                              on ? prev.filter((c) => c !== ref) : [...prev, ref],
+                            )
+                          }
+                          className={`rounded-full px-2.5 py-1 font-mono text-xs font-medium ring-1 ring-inset transition ${
+                            on
+                              ? "bg-slate-900 text-white ring-slate-900"
+                              : "bg-white text-slate-500 ring-slate-300 hover:bg-slate-50"
+                          }`}
+                        >
+                          {on ? "✓ " : "+ "}
+                          {ref}
+                        </button>
+                      );
+                    })}
+                    <span className="text-xs text-slate-500">
+                      {mappedControls.length === 0
+                        ? "No controls mapped"
+                        : `Mapped to ${mappedControls.join(", ")}`}
+                    </span>
+                  </div>
+                )}
               </Field>
 
               {review.flags.length > 0 && (

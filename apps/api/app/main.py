@@ -24,7 +24,12 @@ import google.generativeai as genai
 dotenv_path = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path, override=True)
 
-from app.upload_lookup import UploadLookupResponse, lookup_upload
+from app.upload_lookup import (
+    RequestDetailResponse,
+    UploadLookupResponse,
+    get_request_detail,
+    lookup_upload,
+)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://anushka@127.0.0.1:5432/ai_audit_copilot")
 UPLOAD_BASE_URL = os.getenv("UPLOAD_BASE_URL", "http://localhost:3000/upload")
@@ -167,6 +172,14 @@ def get_engagement(engagement_id: str) -> EngagementResponse:
 @app.get("/upload/{token}", response_model=UploadLookupResponse)
 def get_upload_lookup(token: str):
     return lookup_upload(token)
+
+
+@app.get("/evidence-requests/{request_id}", response_model=RequestDetailResponse)
+def get_request_detail_route(request_id: str):
+    detail = get_request_detail(request_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Evidence request not found")
+    return detail
 
 
 # Catches unfilled template fields like "[DD-MM-YYYY]" or "[Organization

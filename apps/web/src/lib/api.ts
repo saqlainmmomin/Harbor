@@ -1,4 +1,4 @@
-import type { EvidenceRequest, Stakeholder, RequestStatus } from "@/lib/types";
+import type { AiReview, ConfidenceLabel, CompletenessLabel, EvidenceRequest, Stakeholder, RequestStatus } from "@/lib/types";
 import type { AuditorContact } from "@/lib/upload-link";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
@@ -68,5 +68,91 @@ export async function lookupUploadToken(token: string): Promise<UploadLookupResp
     request: mapWireRequest(wire.request),
     stakeholder: wire.stakeholder,
     auditor: wire.auditor,
+  };
+}
+
+// --- GET /evidence-requests/{id} — powers the review panel's request detail
+// (title, description, status, submitted files). Distinct from the upload
+// endpoint above: this one is keyed by request id, not magic-link token, and
+// its `files` are the real submitted list (see app/upload_lookup.py's
+// get_request_detail vs lookup_upload).
+interface RequestDetailWire {
+  request: ApiEvidenceRequestWire;
+  stakeholder: Stakeholder;
+}
+
+export async function fetchRequestDetail(
+  requestId: string,
+): Promise<{ request: EvidenceRequest; stakeholder: Stakeholder } | null> {
+  const response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) return null;
+  const wire: RequestDetailWire = await response.json();
+  return { request: mapWireRequest(wire.request), stakeholder: wire.stakeholder };
+}
+
+// --- GET /evidence-requests/{id}/review — the actual AI output for the
+// most recently submitted file. `ai_review` is null when a file was
+// uploaded but analysis hasn't produced a row yet (see main.py); the whole
+// call 404s when no file has been submitted at all.
+interface WireSuggestedControl {
+  control_name: string;
+  confidence_label: ConfidenceLabel;
+  rationale: string;
+}
+
+interface WireAiReview {
+  id: string;
+  document_type: string | null;
+  summary: string | null;
+  suggested_controls: WireSuggestedControl[] | null;
+  missing_sections: string[] | null;
+  completeness_label: CompletenessLabel | null;
+  raw_response: { model_requested?: string; model_resolved?: string } | null;
+  created_at: string;
+}
+
+interface EvidenceReviewWire {
+  evidence_file: { id: string; filename: string; path: string; uploaded_at: string };
+  ai_review: WireAiReview | null;
+}
+
+export async function fetchEvidenceReview(requestId: string): Promise<EvidenceReviewWire | null> {
+  const response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/review`, {
+    cache: "no-store",
+  });
+  // 404 means no file has been submitted yet — same "nothing to show" case
+  // as a null ai_review, just one step earlier.
+  if (!response.ok) return null;
+  return response.json();
+}
+
+/** Maps the wire review shape onto the app-wide AiReview type. Fields the
+ * real pipeline doesn't produce (doc_type_alternatives, excerpts) are left
+ * empty rather than fabricated — the UI already hides those sections when
+ * empty, so this doesn't imply capability that isn't there. */
+export function mapWireAiReview(wire: EvidenceReviewWire): AiReview | null {
+  const r = wire.ai_review;
+  if (!r) return null;
+  return {
+    id: r.id,
+    evidence_file_id: wire.evidence_file.id,
+    model: r.raw_response?.model_resolved || r.raw_response?.model_requested || "unknown model",
+    reviewed_at: r.created_at,
+    doc_type: r.document_type ?? "Unclassified document",
+    doc_type_alternatives: [],
+    summary: r.summary ?? "",
+    completeness: r.completeness_label ?? "insufficient",
+    suggested_control_refs: (r.suggested_controls ?? []).map((c) => c.control_name),
+    suggested_controls: r.suggested_controls ?? undefined,
+    flags: (r.missing_sections ?? []).map((section, i) => ({
+      id: `missing_${i}`,
+      severity: "warning" as const,
+      title: section,
+      detail: "",
+      location: null,
+    })),
+    excerpts: [],
   };
 }

@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { ControlChip, StatusBadge } from "@/components/badges";
 import { ReviewPanel } from "@/components/review/review-panel";
 import { dueLabel } from "@/lib/format";
+import { fetchEvidenceReview, fetchRequestDetail, mapWireAiReview } from "@/lib/api";
 import {
   controlByRef,
   evidenceRequests,
@@ -10,6 +11,7 @@ import {
   getRequest,
   stakeholderById,
 } from "@/lib/mock-data";
+import type { ActivityEntry, EvidenceRequest, Stakeholder } from "@/lib/types";
 
 export function generateStaticParams() {
   return evidenceRequests.map((r) => ({
@@ -22,10 +24,33 @@ export default async function ReviewPage(
   props: PageProps<"/engagements/[engagementId]/requests/[requestId]">,
 ) {
   const { engagementId, requestId } = await props.params;
-  const request = getRequest(requestId);
-  if (!request) notFound();
 
-  const stakeholder = stakeholderById[request.stakeholder_id];
+  // Real backend requests take priority; fall back to the mock-data
+  // prototype set for IDs the API doesn't know about (e.g. req_014) so the
+  // existing demo routes keep working unchanged.
+  const apiDetail = await fetchRequestDetail(requestId);
+
+  let request: EvidenceRequest;
+  let stakeholder: Stakeholder;
+  let activity: ActivityEntry[];
+
+  if (apiDetail) {
+    const reviewWire = await fetchEvidenceReview(requestId);
+    request = {
+      ...apiDetail.request,
+      ai_review: reviewWire ? mapWireAiReview(reviewWire) : null,
+    };
+    stakeholder = apiDetail.stakeholder;
+    // activity_log isn't written to by the backend yet (see apps/api/README.md)
+    activity = [];
+  } else {
+    const mockRequest = getRequest(requestId);
+    if (!mockRequest) notFound();
+    request = mockRequest;
+    stakeholder = stakeholderById[request.stakeholder_id];
+    activity = getActivityFor(request.id);
+  }
+
   const control = controlByRef[request.control_ref];
   const due = dueLabel(request.due_date);
 

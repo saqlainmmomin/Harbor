@@ -1,4 +1,4 @@
-import type { CompletenessLabel, FlagSeverity, RequestStatus } from "@/lib/types";
+import type { CompletenessLabel, ConfidenceLabel, FlagSeverity, RequestStatus } from "@/lib/types";
 import { COMPLETENESS_LABEL, STATUS_LABEL } from "@/lib/format";
 
 const STATUS_STYLE: Record<RequestStatus, string> = {
@@ -67,6 +67,16 @@ const SEVERITY_STYLE: Record<FlagSeverity, { chip: string; dot: string; label: s
 
 export function severityStyle(severity: FlagSeverity) {
   return SEVERITY_STYLE[severity];
+}
+
+const CONFIDENCE_STYLE: Record<ConfidenceLabel, { chip: string; label: string }> = {
+  strong_match: { chip: "bg-emerald-50 text-emerald-800 ring-emerald-200", label: "Strong match" },
+  partial_match: { chip: "bg-amber-50 text-amber-800 ring-amber-200", label: "Partial match" },
+  weak_match: { chip: "bg-slate-100 text-slate-600 ring-slate-300", label: "Weak match" },
+};
+
+export function confidenceStyle(confidence: ConfidenceLabel) {
+  return CONFIDENCE_STYLE[confidence];
 }
 
 export function ControlChip({ refCode }: { refCode: string }) {
