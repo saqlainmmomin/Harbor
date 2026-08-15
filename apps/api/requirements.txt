@@ -2,15 +2,15 @@ fastapi==0.115.0
 uvicorn[standard]==0.32.0
 psycopg[binary]==3.2.4
 pydantic==2.9.0
-requests==2.34.2
 python-dotenv==1.2.2
 resend==2.35.0
 pypdf==3.15.0
+google-generativeai==0.8.6
 
 # installed but not currently imported by app code — kept pinned since
 # they're already in the venv; drop them if you don't have near-term
-# plans to use SQLAlchemy models or the official openai SDK client
+# plans to use SQLAlchemy models, direct HTTP calls, or pytest
 sqlalchemy==2.0.4
-openai==1.9.0
+requests==2.34.2
 httpx==0.28.0
 pytest==8.4.0

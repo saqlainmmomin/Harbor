@@ -16,9 +16,10 @@ from fastapi import UploadFile, File
 import shutil
 import uuid
 import json
+import re
 from datetime import datetime
 from pypdf import PdfReader
-import requests as http_requests
+import google.generativeai as genai
 
 dotenv_path = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path, override=True)
@@ -29,8 +30,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://anushka@127.0.0.1:5432/ai
 UPLOAD_BASE_URL = os.getenv("UPLOAD_BASE_URL", "http://localhost:3000/upload")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 RESEND_FROM = os.getenv("RESEND_FROM", "onboarding@resend.dev")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 resend.api_key = RESEND_API_KEY
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 
 @asynccontextmanager
@@ -165,6 +169,52 @@ def get_upload_lookup(token: str):
     return lookup_upload(token)
 
 
+# Catches unfilled template fields like "[DD-MM-YYYY]" or "[Organization
+# Name]". Deliberately code-based, not AI judgment — the model will happily
+# call a document "complete" even with visible placeholder brackets still in
+# it, so this acts as a hard floor underneath whatever it concludes.
+PLACEHOLDER_PATTERN = re.compile(r"\[[^\[\]\n]{1,50}\]")
+
+COMPLETENESS_RANK = {"insufficient": 0, "partial": 1, "complete": 2}
+
+
+def find_unfilled_placeholders(text: str) -> list[str]:
+    """Unique bracketed spans that look like unfilled template placeholders.
+    Skips brackets containing only digits/punctuation (e.g. "[1]", "[12]")
+    since those are almost always citation/footnote refs, not placeholders —
+    a real placeholder has at least one letter in it."""
+    seen: dict[str, None] = {}
+    for match in PLACEHOLDER_PATTERN.findall(text):
+        inner = match[1:-1].strip()
+        if inner and re.search(r"[A-Za-z]", inner):
+            seen.setdefault(match, None)
+    return list(seen.keys())
+
+
+def apply_placeholder_check(parsed: dict, full_text: str) -> dict:
+    """Caps completeness_label at "partial" and appends a missing_sections
+    note if the document still has unfilled template placeholders — this
+    overrides the AI's own completeness judgment, it doesn't just advise it."""
+    placeholders = find_unfilled_placeholders(full_text)
+    if not placeholders:
+        return parsed
+
+    current_label = parsed.get("completeness_label")
+    if COMPLETENESS_RANK.get(current_label, COMPLETENESS_RANK["complete"]) > COMPLETENESS_RANK["partial"]:
+        parsed["completeness_label"] = "partial"
+
+    missing = parsed.get("missing_sections")
+    missing = list(missing) if isinstance(missing, list) else []
+    shown = ", ".join(placeholders[:5])
+    if len(placeholders) > 5:
+        shown += f", +{len(placeholders) - 5} more"
+    note = f"Document contains unfilled template fields: {shown}."
+    if not any("unfilled template field" in str(m).lower() for m in missing):
+        missing.append(note)
+    parsed["missing_sections"] = missing
+    return parsed
+
+
 @app.post("/evidence-requests/{request_id}/upload")
 def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
     # only accept PDFs for this first-pass implementation
@@ -229,10 +279,9 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"message": "Failed to extract PDF text", "error": str(exc)})
 
-    # Prepare OpenAI prompt
-    openai_api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_KEY") or os.getenv("OPENAIAPI_KEY")
-    if not openai_api_key:
-        raise HTTPException(status_code=500, detail="OpenAI API key not configured")
+    # Prepare Gemini prompt
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="Gemini API key not configured")
 
     system_msg = (
         "You are a compliance reviewer. Given the raw extracted text of a policy document, "
@@ -252,38 +301,54 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
     prompt = f"Analyze the following document text:\n---\n{doc_text}\n---\nRespond as JSON per the schema."
 
     try:
-        resp = http_requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {openai_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.0,
-                "max_tokens": 800,
-            },
-            timeout=60,
+        # gemini-1.5-flash is fully retired, and the pinned gemini-2.5-flash
+        # is walled off from new API keys ("no longer available to new
+        # users"). gemini-flash-latest is a rolling alias Google keeps
+        # pointed at whatever flash model is currently servable — confirmed
+        # working directly against the REST API (currently resolves to
+        # gemini-3.7-flash). Trades version stability for not breaking again
+        # the next time a pinned model gets sunset.
+        model = genai.GenerativeModel(
+            model_name="gemini-flash-latest",
+            system_instruction=system_msg,
         )
-        resp.raise_for_status()
-        body = resp.json()
-        # extract assistant content
-        assistant_text = None
-        if "choices" in body and len(body["choices"]) > 0:
-            assistant_text = body["choices"][0].get("message", {}).get("content")
-        # try parse JSON
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.0,
+                # gemini-3.7-flash spends part of max_output_tokens on
+                # internal "thinking" tokens before the visible answer (seen
+                # eating 87 tokens for a 1-token reply in testing) — this SDK
+                # version has no thinking-budget control to disable that, so
+                # the budget needs enough headroom for both. 800 truncated
+                # the JSON mid-response; 4096 leaves real room for it.
+                max_output_tokens=4096,
+                response_mime_type="application/json",
+            ),
+        )
+        assistant_text = response.text
+        # keep the same "raw_response JSONB" shape downstream expects, just
+        # sourced from Gemini instead of OpenAI's chat-completions envelope
+        body = {
+            "provider": "gemini",
+            "model_requested": "gemini-flash-latest",
+            "model_resolved": getattr(response, "model_version", None),
+            "text": assistant_text,
+            "finish_reason": str(response.candidates[0].finish_reason) if response.candidates else None,
+        }
         parsed = None
         if assistant_text:
             try:
                 parsed = json.loads(assistant_text)
             except Exception:
                 parsed = None
-    except http_requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail={"message": "OpenAI API request failed", "error": str(exc)})
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"message": "Gemini API request failed", "error": str(exc)})
+
+    # Code-based floor on completeness_label — runs regardless of what the
+    # model concluded. See apply_placeholder_check / find_unfilled_placeholders.
+    if parsed is not None:
+        parsed = apply_placeholder_check(parsed, full_text)
 
     # persist ai_review row
     ai_id = f"ai_{uuid.uuid4().hex}"
