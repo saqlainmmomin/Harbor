@@ -4,7 +4,14 @@ from datetime import datetime, timezone
 
 import psycopg
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://anushka@127.0.0.1:5432/ai_audit_copilot")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    # Same failure mode as app/main.py's startup check: no silent fallback to
+    # a hardcoded personal machine's connection string. This script doesn't
+    # load apps/api/.env itself (unlike main.py) -- export DATABASE_URL first,
+    # e.g. `export $(grep -v '^#' .env | xargs) && python seed.py`.
+    print("FATAL: DATABASE_URL is not set. See apps/api/README.md.", file=sys.stderr)
+    sys.exit(1)
 
 
 def main() -> None:

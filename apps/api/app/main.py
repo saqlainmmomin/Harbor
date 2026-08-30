@@ -1,6 +1,7 @@
 import os
 import secrets
 import ssl
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -32,15 +33,45 @@ from app.upload_lookup import (
     lookup_upload,
 )
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://anushka@127.0.0.1:5432/ai_audit_copilot")
+DATABASE_URL = os.getenv("DATABASE_URL")
 UPLOAD_BASE_URL = os.getenv("UPLOAD_BASE_URL", "http://localhost:3000/upload")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 RESEND_FROM = os.getenv("RESEND_FROM", "onboarding@resend.dev")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Fail immediately and clearly if required config is missing, rather than
+# limping along and surfacing it later as an opaque 500 on whichever request
+# happens to touch the missing piece first (e.g. psycopg.connect() failing
+# deep inside get_db_connection, or a 502 from Gemini/Resend on first use).
+# DATABASE_URL in particular used to silently fall back to
+# "postgresql://anushka@127.0.0.1:5432/ai_audit_copilot" -- hardcoding the
+# original developer's own machine username, which is wrong for literally
+# any other environment. No more silent fallback: set it explicitly.
+REQUIRED_ENV_VARS = {
+    "DATABASE_URL": DATABASE_URL,
+    "GEMINI_API_KEY": GEMINI_API_KEY,
+    "RESEND_API_KEY": RESEND_API_KEY,
+}
+
+
+def _check_required_env_vars() -> None:
+    missing = [name for name, value in REQUIRED_ENV_VARS.items() if not value]
+    if not missing:
+        return
+    print("=" * 72, file=sys.stderr)
+    print("FATAL: missing required environment variable(s):", file=sys.stderr)
+    for name in missing:
+        print(f"  - {name}", file=sys.stderr)
+    print(file=sys.stderr)
+    print(f"Set them in {dotenv_path} and restart. See apps/api/README.md.", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    sys.exit(1)
+
+
+_check_required_env_vars()
+
 resend.api_key = RESEND_API_KEY
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 
 
 @asynccontextmanager
@@ -301,10 +332,9 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"message": "Failed to extract PDF text", "error": str(exc)})
 
-    # Prepare Gemini prompt
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="Gemini API key not configured")
-
+    # Prepare Gemini prompt. No missing-key check here -- _check_required_env_vars()
+    # already guarantees GEMINI_API_KEY is set for the lifetime of the process,
+    # or the app never started.
     system_msg = (
         "You are a compliance reviewer. Given the raw extracted text of a policy document, "
         "return ONLY a JSON object with the following keys: document_type, summary, suggested_controls, missing_sections, completeness_label. "
