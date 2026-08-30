@@ -209,5 +209,6 @@ open http://localhost:3000                            # redirects to /sign-in if
 - Decide on Gemini paid tier (or a fallback model) before relying on the AI
   review pipeline for real usage.
 - Add a way to view/download the original uploaded evidence file.
-- A data-handling note (where evidence files live, retention, encryption,
-  access) is coming next as `SECURITY.md`.
+- Read [SECURITY.md](SECURITY.md) for current data-handling practices —
+  in particular, there's no retention policy and no TLS enforcement on the
+  database connection yet.
