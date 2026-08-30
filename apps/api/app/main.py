@@ -1,3 +1,4 @@
+import io
 import os
 import secrets
 import ssl
@@ -14,7 +15,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi import UploadFile, File
-import shutil
+from supabase import create_client
+from storage3.exceptions import StorageApiError
 import uuid
 import json
 import re
@@ -38,12 +40,15 @@ UPLOAD_BASE_URL = os.getenv("UPLOAD_BASE_URL", "http://localhost:3000/upload")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 RESEND_FROM = os.getenv("RESEND_FROM", "onboarding@resend.dev")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET")
 
 # Fail immediately and clearly if required config is missing, rather than
 # limping along and surfacing it later as an opaque 500 on whichever request
 # happens to touch the missing piece first (e.g. psycopg.connect() failing
-# deep inside get_db_connection, or a 502 from Gemini/Resend on first use).
-# DATABASE_URL in particular used to silently fall back to
+# deep inside get_db_connection, or a 502 from Gemini/Resend/Supabase on
+# first use). DATABASE_URL in particular used to silently fall back to
 # "postgresql://anushka@127.0.0.1:5432/ai_audit_copilot" -- hardcoding the
 # original developer's own machine username, which is wrong for literally
 # any other environment. No more silent fallback: set it explicitly.
@@ -51,6 +56,9 @@ REQUIRED_ENV_VARS = {
     "DATABASE_URL": DATABASE_URL,
     "GEMINI_API_KEY": GEMINI_API_KEY,
     "RESEND_API_KEY": RESEND_API_KEY,
+    "SUPABASE_URL": SUPABASE_URL,
+    "SUPABASE_SERVICE_ROLE_KEY": SUPABASE_SERVICE_ROLE_KEY,
+    "SUPABASE_STORAGE_BUCKET": SUPABASE_STORAGE_BUCKET,
 }
 
 
@@ -72,6 +80,9 @@ _check_required_env_vars()
 
 resend.api_key = RESEND_API_KEY
 genai.configure(api_key=GEMINI_API_KEY)
+# service-role key -- server-side only, bypasses bucket RLS. Never expose
+# this to the frontend; the web app never talks to Supabase directly.
+supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 @asynccontextmanager
@@ -274,16 +285,25 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF uploads are supported")
 
-    uploads_dir = Path(__file__).resolve().parents[1] / "uploads"
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-
     file_id = f"file_{uuid.uuid4().hex}"
-    filename = f"{file_id}.pdf"
-    file_path = uploads_dir / filename
+    storage_key = f"{file_id}.pdf"
+    contents = file.file.read()
+    size_bytes = len(contents)
 
-    # save uploaded file to disk
-    with open(file_path, "wb") as out_f:
-        shutil.copyfileobj(file.file, out_f)
+    # Uploaded to Supabase Storage, not local disk -- local disk doesn't
+    # survive a redeploy and isn't shared across instances/hosts. Nothing is
+    # written to apps/api/uploads/ anymore; that directory is legacy.
+    try:
+        supabase_client.storage.from_(SUPABASE_STORAGE_BUCKET).upload(
+            storage_key,
+            contents,
+            {"content-type": "application/pdf"},
+        )
+    except StorageApiError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"message": "Supabase Storage upload failed", "error": str(exc)},
+        )
 
     db = get_db_connection()
     # ensure tables exist (simple DDL for local testing)
@@ -295,10 +315,15 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
                 evidence_request_id TEXT,
                 filename TEXT,
                 path TEXT,
+                size_bytes BIGINT,
                 uploaded_at TIMESTAMPTZ DEFAULT NOW()
             )
             """
         )
+        # Lazy migration for a table created before size_bytes existed, and
+        # before `path` was repurposed to hold a Supabase Storage object key
+        # instead of a local filesystem path.
+        cur.execute("ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS size_bytes BIGINT")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_reviews (
@@ -316,14 +341,15 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
         )
 
         cur.execute(
-            "INSERT INTO evidence_files (id, evidence_request_id, filename, path) VALUES (%s, %s, %s, %s)",
-            (file_id, request_id, filename, str(file_path)),
+            "INSERT INTO evidence_files (id, evidence_request_id, filename, path, size_bytes) VALUES (%s, %s, %s, %s, %s)",
+            (file_id, request_id, storage_key, storage_key, size_bytes),
         )
         db.commit()
 
-    # extract text from the PDF
+    # extract text from the PDF -- straight from the in-memory bytes just
+    # uploaded, no round trip back to disk or to Supabase needed.
     try:
-        reader = PdfReader(str(file_path))
+        reader = PdfReader(io.BytesIO(contents))
         text_parts = []
         for p in reader.pages:
             page_text = p.extract_text() or ""
@@ -431,7 +457,7 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
         db.commit()
 
     return {
-        "evidence_file": {"id": file_id, "filename": filename, "path": str(file_path)},
+        "evidence_file": {"id": file_id, "filename": storage_key, "path": storage_key, "size_bytes": size_bytes},
         "ai_review": parsed if parsed else {"raw_response": body},
     }
 
@@ -447,6 +473,8 @@ def get_evidence_review(request_id: str):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="No evidence file found for request")
+        # `path` is a Supabase Storage object key now, not a filesystem path
+        # -- passed through as-is, the frontend doesn't currently render it.
         file_row = {"id": row[0], "filename": row[1], "path": row[2], "uploaded_at": row[3]}
 
         cur.execute(

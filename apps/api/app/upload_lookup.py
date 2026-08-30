@@ -3,7 +3,10 @@ import psycopg
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://anushka@127.0.0.1:5432/ai_audit_copilot")
+# No hardcoded personal-machine fallback here either (see main.py's
+# _check_required_env_vars, which runs right after this module is imported
+# and refuses to serve any request if DATABASE_URL is unset).
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def get_db_connection():
@@ -120,23 +123,23 @@ def get_request_detail(request_id: str) -> RequestDetailResponse | None:
 
             stakeholder_id = row[2]
 
+            # size_bytes is a stored column now, not derived from a local
+            # file (evidence files live in Supabase Storage; the app server
+            # has no filesystem access to them at read time). NULL for any
+            # row uploaded before this column existed.
             cur.execute(
-                "SELECT id, filename, path, uploaded_at FROM evidence_files WHERE evidence_request_id = %s ORDER BY uploaded_at DESC",
+                "SELECT id, filename, size_bytes, uploaded_at FROM evidence_files WHERE evidence_request_id = %s ORDER BY uploaded_at DESC",
                 (request_id,),
             )
             files = []
-            for file_id, filename, path, uploaded_at in cur.fetchall():
-                try:
-                    size_bytes = os.path.getsize(path)
-                except OSError:
-                    size_bytes = 0
+            for file_id, filename, size_bytes, uploaded_at in cur.fetchall():
                 files.append(
                     {
                         "id": file_id,
                         "filename": filename,
                         # only PDFs are accepted by the upload endpoint today
                         "mime_type": "application/pdf",
-                        "size_bytes": size_bytes,
+                        "size_bytes": size_bytes or 0,
                         # page count isn't stored anywhere yet
                         "page_count": None,
                         "uploaded_at": uploaded_at.isoformat() if uploaded_at else "",
@@ -223,25 +226,23 @@ def list_requests_for_engagement(engagement_id: str) -> dict:
             ) in rows:
                 stakeholder_ids.add(stakeholder_id)
 
+                # size_bytes is a stored column now (see get_request_detail) —
+                # not derived from a local file.
                 cur.execute(
-                    "SELECT id, filename, path, uploaded_at FROM evidence_files WHERE evidence_request_id = %s ORDER BY uploaded_at DESC",
+                    "SELECT id, filename, size_bytes, uploaded_at FROM evidence_files WHERE evidence_request_id = %s ORDER BY uploaded_at DESC",
                     (request_id,),
                 )
                 files = []
                 latest_file_id = None
-                for file_id, filename, path, uploaded_at in cur.fetchall():
+                for file_id, filename, size_bytes, uploaded_at in cur.fetchall():
                     if latest_file_id is None:
                         latest_file_id = file_id
-                    try:
-                        size_bytes = os.path.getsize(path)
-                    except OSError:
-                        size_bytes = 0
                     files.append(
                         {
                             "id": file_id,
                             "filename": filename,
                             "mime_type": "application/pdf",
-                            "size_bytes": size_bytes,
+                            "size_bytes": size_bytes or 0,
                             "page_count": None,
                             "uploaded_at": uploaded_at.isoformat() if uploaded_at else "",
                             "uploaded_by_stakeholder_id": stakeholder_id,
