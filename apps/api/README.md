@@ -6,29 +6,38 @@ Real backend, running against a local Postgres database. Not yet deployed
 ```
 app/
   main.py               # FastAPI app; engagement lookup, magic-link send,
-                         # PDF upload → AI review pipeline
-  upload_lookup.py       # token → request/stakeholder/auditor resolution
-                          # for the public /upload/[token] page
+                         # PDF upload → AI review pipeline, startup config check
+  upload_lookup.py       # token/id → request/stakeholder/auditor resolution,
+                          # and the dashboard's list-all-requests query
 seed.py                  # local test data (1 engagement, 1 evidence request)
 tests/                   # smoke tests
-uploads/                 # uploaded PDFs land here (gitignored, local only)
+uploads/                 # LEGACY — pre-Supabase-migration local test files.
+                          # Nothing is written here anymore; gitignored.
 ```
 
 ## What's actually built
 
 - `GET /health` — healthcheck
 - `GET /engagements/{engagement_id}` — engagement lookup
+- `GET /engagements/{engagement_id}/evidence-requests` — every real evidence
+  request for the engagement, each with its files and latest AI review
+  inlined, plus the distinct stakeholders touched. Powers the evidence
+  dashboard.
 - `GET /upload/{token}` — resolves a magic-link token to the evidence
   request/stakeholder/auditor, or `{"kind": "invalid"}` if the token doesn't
   match. (Note: doesn't yet distinguish an *expired* token from an *approved*
   one — the DB doesn't track those states here yet.)
+- `GET /evidence-requests/{request_id}` — request detail for the review panel
 - `POST /evidence-requests/{request_id}/send` — generates (or reuses) a
   magic-link token, emails it via Resend
-- `POST /evidence-requests/{request_id}/upload` — accepts a PDF, saves it to
-  `uploads/`, extracts text with `pypdf`, sends it to OpenAI `gpt-4o-mini`
-  with a compliance-reviewer prompt, and persists the structured result
-  (`document_type`, `summary`, `suggested_controls`, `missing_sections`,
-  `completeness_label`) to the `ai_reviews` table
+- `POST /evidence-requests/{request_id}/upload` — accepts a PDF, uploads it
+  to Supabase Storage, extracts text with `pypdf`, sends it to Gemini
+  (`gemini-flash-latest`) with a compliance-reviewer prompt, applies a
+  code-based placeholder-detection floor on top of the model's own
+  completeness judgment, and persists the result (`document_type`,
+  `summary`, `suggested_controls`, `missing_sections`,
+  `completeness_label`) to the `ai_reviews` table. Also flips the request's
+  `status` to `pending_review`.
 - `GET /evidence-requests/{request_id}/review` — latest uploaded file + its
   AI review for a request
 
@@ -44,6 +53,16 @@ decisions aren't persisted anywhere on the backend yet. The frontend's
 `EvidenceRequest.decision` field is always `null` when populated from the
 real API as a result.
 
+## File storage
+
+Evidence PDFs are uploaded straight into memory and sent to **Supabase
+Storage** (a private bucket) — nothing is written to local disk. The
+`evidence_files.path` column holds the Supabase object key (not a
+filesystem path, despite the column name — repurposed rather than migrated,
+since renaming it wasn't worth the risk for no behavior change).
+`apps/api/uploads/` is a dead directory from before this migration; it's
+still gitignored but nothing reads or writes it anymore.
+
 ## Setup
 
 ```bash
@@ -52,16 +71,43 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`.env` (gitignored) needs:
-```
-OPENAI_API_KEY=...
+`.env` (gitignored) needs **all** of the following — the app checks for
+them at startup and refuses to boot (clear message, exit 1) if any are
+missing:
+
+```bash
+DATABASE_URL=postgresql://<user>@127.0.0.1:5432/ai_audit_copilot
+GEMINI_API_KEY=...
 RESEND_API_KEY=...
-DATABASE_URL=postgresql://<user>@127.0.0.1:5432/ai_audit_copilot   # optional, this is the default
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=...          # service_role secret, not anon
+SUPABASE_STORAGE_BUCKET=...            # a private bucket you've created
+
+# optional, have defaults:
+RESEND_FROM=onboarding@resend.dev
+UPLOAD_BASE_URL=http://localhost:3000/upload
 ```
+
+Seed the DB (this script doesn't load `.env` itself):
+
+```bash
+export $(grep -v '^#' .env | xargs)
+python seed.py
+```
+
+Run it:
 
 ```bash
 uvicorn app.main:app --reload --port 8000
 ```
+
+## Known constraints
+
+- **Gemini free tier**: 20 requests/day. Expect real 429s during testing;
+  there's no retry/backoff or paid-tier fallback yet.
+- **N+1 queries** in `list_requests_for_engagement` (one query per request
+  for files/AI review) — fine at the current scale of a handful of requests
+  per engagement, revisit with a real join if that stops being true.
 
 ## Two rules worth locking in early
 
