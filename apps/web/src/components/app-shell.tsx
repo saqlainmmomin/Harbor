@@ -1,8 +1,8 @@
 import Link from "next/link";
-import { engagement } from "@/lib/mock-data";
+import { DEFAULT_ENGAGEMENT_ID } from "@/lib/config";
 
 const NAV = [
-  { label: "Evidence dashboard", href: `/engagements/${engagement.id}`, ready: true },
+  { label: "Evidence dashboard", href: `/engagements/${DEFAULT_ENGAGEMENT_ID}`, ready: true },
   { label: "Control checklist", href: "#", ready: false },
   { label: "Stakeholders", href: "#", ready: false },
   { label: "Activity log", href: "#", ready: false },

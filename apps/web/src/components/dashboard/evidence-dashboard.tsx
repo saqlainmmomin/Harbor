@@ -88,7 +88,9 @@ export function EvidenceDashboard({
       });
   }, [requests, bucket, owner, query, stakeholders]);
 
-  const pct = Math.round((counts.approved / counts.all) * 100);
+  // counts.all is 0 for a brand-new engagement with no real requests yet —
+  // guard against NaN% rather than dividing by zero.
+  const pct = counts.all > 0 ? Math.round((counts.approved / counts.all) * 100) : 0;
 
   return (
     <div className="space-y-5">

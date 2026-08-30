@@ -1,5 +1,13 @@
-import { TODAY } from "./mock-data";
 import type { CompletenessLabel, DecisionType, RequestStatus } from "./types";
+
+// Real wall-clock time. The old mock-data.ts `TODAY` constant froze this at
+// 2026-07-29 so the seeded demo rows' overdue/due-soon states stayed stable
+// — fine for fabricated data authored against that date, wrong once this
+// function runs against real due dates from Postgres (a real request due
+// yesterday must show as overdue today, not on some frozen prototype date).
+function today(): Date {
+  return new Date();
+}
 
 const DAY_MS = 86_400_000;
 
@@ -31,7 +39,7 @@ export function formatBytes(bytes: number): string {
 }
 
 export function relativeTime(iso: string): string {
-  const diff = TODAY.getTime() - new Date(iso).getTime();
+  const diff = today().getTime() - new Date(iso).getTime();
   const mins = Math.round(diff / 60_000);
   if (mins < 60) return `${Math.max(mins, 1)}m ago`;
   const hours = Math.round(mins / 60);
@@ -44,7 +52,7 @@ export function relativeTime(iso: string): string {
 /** Negative = overdue. */
 export function daysUntil(isoDate: string): number {
   const due = new Date(`${isoDate}T00:00:00Z`).getTime();
-  const now = new Date(TODAY.toISOString().slice(0, 10) + "T00:00:00Z").getTime();
+  const now = new Date(today().toISOString().slice(0, 10) + "T00:00:00Z").getTime();
   return Math.round((due - now) / DAY_MS);
 }
 

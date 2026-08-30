@@ -1,4 +1,4 @@
-import type { AiReview, ConfidenceLabel, CompletenessLabel, EvidenceRequest, Stakeholder, RequestStatus } from "@/lib/types";
+import type { AiReview, ConfidenceLabel, CompletenessLabel, Engagement, EvidenceRequest, Stakeholder, RequestStatus } from "@/lib/types";
 import type { AuditorContact } from "@/lib/upload-link";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
@@ -131,13 +131,15 @@ export async function fetchEvidenceReview(requestId: string): Promise<EvidenceRe
 /** Maps the wire review shape onto the app-wide AiReview type. Fields the
  * real pipeline doesn't produce (doc_type_alternatives, excerpts) are left
  * empty rather than fabricated — the UI already hides those sections when
- * empty, so this doesn't imply capability that isn't there. */
-export function mapWireAiReview(wire: EvidenceReviewWire): AiReview | null {
-  const r = wire.ai_review;
+ * empty, so this doesn't imply capability that isn't there. Shared by the
+ * review-panel fetch (fetchEvidenceReview, one request at a time) and the
+ * dashboard list fetch (fetchEngagementRequests, ai_review inlined per row)
+ * below. */
+function mapWireAiReviewInner(r: WireAiReview | null, evidenceFileId: string): AiReview | null {
   if (!r) return null;
   return {
     id: r.id,
-    evidence_file_id: wire.evidence_file.id,
+    evidence_file_id: evidenceFileId,
     model: r.raw_response?.model_resolved || r.raw_response?.model_requested || "unknown model",
     reviewed_at: r.created_at,
     doc_type: r.document_type ?? "Unclassified document",
@@ -155,4 +157,50 @@ export function mapWireAiReview(wire: EvidenceReviewWire): AiReview | null {
     })),
     excerpts: [],
   };
+}
+
+export function mapWireAiReview(wire: EvidenceReviewWire): AiReview | null {
+  return mapWireAiReviewInner(wire.ai_review, wire.evidence_file.id);
+}
+
+// --- GET /engagements/{id} — engagement header info for the dashboard.
+export async function fetchEngagement(engagementId: string): Promise<Engagement | null> {
+  const response = await fetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) return null;
+  return response.json();
+}
+
+// --- GET /engagements/{id}/evidence-requests — every real evidence request
+// for the engagement, each with its ai_review inlined. Powers the evidence
+// dashboard; replaces the old mock-data.ts evidenceRequests/stakeholderById.
+interface ApiDashboardRequestWire extends ApiEvidenceRequestWire {
+  ai_review: WireAiReview | null;
+  decision: null;
+}
+
+interface ApiDashboardWire {
+  requests: ApiDashboardRequestWire[];
+  stakeholders: Stakeholder[];
+}
+
+export async function fetchEngagementRequests(
+  engagementId: string,
+): Promise<{ requests: EvidenceRequest[]; stakeholders: Record<string, Stakeholder> }> {
+  const response = await fetch(
+    `${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/evidence-requests`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) return { requests: [], stakeholders: {} };
+
+  const wire: ApiDashboardWire = await response.json();
+  const stakeholders = Object.fromEntries(wire.stakeholders.map((s) => [s.id, s]));
+  const requests: EvidenceRequest[] = wire.requests.map((r) => ({
+    ...r,
+    status: r.status as RequestStatus,
+    ai_review: mapWireAiReviewInner(r.ai_review, r.files[0]?.id ?? ""),
+    decision: null,
+  }));
+  return { requests, stakeholders };
 }

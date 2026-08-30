@@ -28,6 +28,7 @@ from app.upload_lookup import (
     RequestDetailResponse,
     UploadLookupResponse,
     get_request_detail,
+    list_requests_for_engagement,
     lookup_upload,
 )
 
@@ -163,10 +164,18 @@ def get_engagement(engagement_id: str) -> EngagementResponse:
             name=row[1],
             client_name=row[2],
             framework=row[3],
-            period_start=row[4],
-            period_end=row[5],
+            # bug: these come back as datetime.date from psycopg, not str —
+            # EngagementResponse.period_start/end are typed str, so this 500'd
+            # on every call until now.
+            period_start=row[4].isoformat() if row[4] else "",
+            period_end=row[5].isoformat() if row[5] else "",
             lead_auditor=row[6],
         )
+
+
+@app.get("/engagements/{engagement_id}/evidence-requests")
+def get_engagement_requests(engagement_id: str):
+    return list_requests_for_engagement(engagement_id)
 
 
 @app.get("/upload/{token}", response_model=UploadLookupResponse)
@@ -378,6 +387,16 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
                 parsed.get("completeness_label") if parsed else None,
                 json.dumps(body) if body is not None else None,
             ),
+        )
+        # The request's own status column was otherwise never touched by this
+        # endpoint — it would sit at whatever seed.py/send_magic_link left it
+        # at (e.g. "awaiting_upload") forever, even once a file was uploaded
+        # and analyzed. This is what the review panel's top badge reads, so
+        # it needs to actually reflect that a review now exists and is
+        # waiting on the auditor, not still on the stakeholder.
+        cur.execute(
+            "UPDATE evidence_requests SET status = %s, last_activity_at = NOW() WHERE id = %s",
+            ("pending_review", request_id),
         )
         db.commit()
 

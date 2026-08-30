@@ -1,11 +1,17 @@
+import { notFound } from "next/navigation";
 import { EvidenceDashboard } from "@/components/dashboard/evidence-dashboard";
 import { formatPeriod } from "@/lib/format";
-import { engagement, evidenceRequests, stakeholderById } from "@/lib/mock-data";
+import { fetchEngagement, fetchEngagementRequests } from "@/lib/api";
 
 export default async function EvidenceDashboardPage(
   props: PageProps<"/engagements/[engagementId]">,
 ) {
   const { engagementId } = await props.params;
+
+  const engagement = await fetchEngagement(engagementId);
+  if (!engagement) notFound();
+
+  const { requests, stakeholders } = await fetchEngagementRequests(engagementId);
 
   return (
     <>
@@ -36,8 +42,8 @@ export default async function EvidenceDashboardPage(
 
       <main className="p-6">
         <EvidenceDashboard
-          requests={evidenceRequests}
-          stakeholders={stakeholderById}
+          requests={requests}
+          stakeholders={stakeholders}
           engagementId={engagementId}
         />
       </main>
