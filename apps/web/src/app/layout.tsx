@@ -12,6 +12,10 @@ export const metadata: Metadata = {
   description: "Request, track, and review SOC 2 audit evidence.",
 };
 
+// No ClerkProvider here deliberately — this layout also wraps /upload/[token]
+// (stakeholder magic-link flow) and the root redirect, neither of which
+// should carry any Clerk involvement at all. ClerkProvider is scoped to the
+// (auth) route group instead — see src/app/(auth)/layout.tsx.
 export default function RootLayout({
   children,
 }: Readonly<{
