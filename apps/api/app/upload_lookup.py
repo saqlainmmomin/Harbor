@@ -13,6 +13,47 @@ def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
 
+def _ensure_ai_reviews_schema(cur) -> None:
+    """ai_reviews is now only otherwise created lazily inside main.py's
+    POST /evidence-files/{id}/analyze (upload no longer touches it) -- this
+    module has its own connection per call (see get_db_connection above), so
+    it can't assume that endpoint has run first. Mirrors
+    main.py's ensure_ai_reviews_schema, including creating evidence_files
+    first (ai_reviews.evidence_file_id references it, and on a database
+    nothing has ever been uploaded to yet, it won't exist either)."""
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evidence_files (
+            id TEXT PRIMARY KEY,
+            evidence_request_id TEXT,
+            filename TEXT,
+            path TEXT,
+            size_bytes BIGINT,
+            uploaded_at TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS size_bytes BIGINT")
+    cur.execute("ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS extracted_text TEXT")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_reviews (
+            id TEXT PRIMARY KEY,
+            evidence_file_id TEXT REFERENCES evidence_files(id),
+            document_type TEXT,
+            summary TEXT,
+            suggested_controls JSONB,
+            missing_sections JSONB,
+            completeness_label TEXT,
+            raw_response JSONB,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS compliance_status TEXT")
+    cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS follow_up_evidence TEXT")
+
+
 class AuditorContact(BaseModel):
     name: str
     firm: str
@@ -231,6 +272,7 @@ def list_requests_for_engagement(engagement_id: str) -> dict:
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            _ensure_ai_reviews_schema(cur)
             cur.execute(
                 """
                 SELECT id, stakeholder_id, control_ref, title, description, status,
@@ -379,6 +421,7 @@ def list_evidence_files_for_engagement(engagement_id: str) -> dict:
     doesn't need a second round trip per row."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            _ensure_ai_reviews_schema(cur)
             cur.execute(
                 """
                 SELECT f.id, f.filename, f.size_bytes, f.uploaded_at,

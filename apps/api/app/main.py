@@ -20,7 +20,6 @@ from supabase import create_client
 from storage3.exceptions import StorageApiError
 import uuid
 import json
-import re
 from datetime import datetime
 from pypdf import PdfReader
 from groq import Groq
@@ -36,6 +35,7 @@ from app.upload_lookup import (
     list_requests_for_engagement,
     lookup_upload,
 )
+from app.services.scope_profiler import compute_scope_multi, get_framework
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPLOAD_BASE_URL = os.getenv("UPLOAD_BASE_URL", "http://localhost:3000/upload")
@@ -53,6 +53,12 @@ RESEND_FROM = os.getenv("RESEND_FROM", "onboarding@resend.dev")
 # billing info, for the same "one JSON completion per uploaded document"
 # job -- see the review pipeline below.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# llama-3.3-70b-versatile (originally requested) isn't in this account's
+# model catalog -- confirmed via client.models.list(), not assumed;
+# Groq's lineup turns over. openai/gpt-oss-120b is the largest
+# instruction-following chat model actually available, and JSON mode
+# verified working against it directly before wiring it in here.
+GROQ_MODEL = "openai/gpt-oss-120b"
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET")
@@ -146,7 +152,7 @@ class EngagementResponse(BaseModel):
     lead_auditor: str
 
 
-VALID_FRAMEWORKS = {"SOC2", "ISO27001"}
+VALID_FRAMEWORKS = {"ISO27001", "NIST_CSF", "PCI_DSS"}
 VALID_COMPANY_SIZES = {"startup", "smb", "mid_market", "enterprise"}
 
 
@@ -182,15 +188,23 @@ def ensure_engagement_schema(cur) -> None:
         """
         CREATE TABLE IF NOT EXISTS engagement_frameworks (
             engagement_id TEXT NOT NULL REFERENCES engagements(id),
-            framework TEXT NOT NULL CHECK (framework IN ('SOC2', 'ISO27001')),
+            framework TEXT NOT NULL CHECK (framework IN ('ISO27001', 'NIST_CSF', 'PCI_DSS')),
             PRIMARY KEY (engagement_id, framework)
         )
         """
     )
+    # SOC2 dropped from VALID_FRAMEWORKS, NIST_CSF/PCI_DSS added -- widen the
+    # CHECK constraint for a table created under the old set too, same
+    # idempotent spirit as the ADD COLUMN IF NOT EXISTS calls above.
+    cur.execute("ALTER TABLE engagement_frameworks DROP CONSTRAINT IF EXISTS engagement_frameworks_framework_check")
+    cur.execute(
+        "ALTER TABLE engagement_frameworks ADD CONSTRAINT engagement_frameworks_framework_check "
+        "CHECK (framework IN ('ISO27001', 'NIST_CSF', 'PCI_DSS'))"
+    )
     cur.execute(
         """
         INSERT INTO engagement_frameworks (engagement_id, framework)
-        SELECT id, framework FROM engagements WHERE framework IN ('SOC2', 'ISO27001')
+        SELECT id, framework FROM engagements WHERE framework IN ('ISO27001', 'NIST_CSF', 'PCI_DSS')
         ON CONFLICT DO NOTHING
         """
     )
@@ -318,28 +332,28 @@ class CreateEvidenceRequestPayload(BaseModel):
     due_date: str
 
 
-@app.post("/evidence-requests", status_code=201)
-def create_evidence_request(payload: CreateEvidenceRequestPayload) -> dict[str, Any]:
-    db = get_db_connection()
-    with db.cursor() as cur:
-        cur.execute("SELECT id FROM engagements WHERE id = %s", (payload.engagement_id,))
-        if cur.fetchone() is None:
-            raise HTTPException(status_code=404, detail="Engagement not found")
-        cur.execute("SELECT id FROM stakeholders WHERE id = %s", (payload.stakeholder_id,))
-        if cur.fetchone() is None:
-            raise HTTPException(status_code=404, detail="Stakeholder not found")
+def _create_evidence_request_row(cur, payload: CreateEvidenceRequestPayload) -> dict[str, Any]:
+    """Insert + activity-log logic for one evidence request, shared by the
+    single-create endpoint and the bulk-create endpoint below. Takes an open
+    cursor and does not commit -- single-create commits right after calling
+    this once; bulk-create commits once for the whole batch."""
+    cur.execute("SELECT id FROM engagements WHERE id = %s", (payload.engagement_id,))
+    if cur.fetchone() is None:
+        raise HTTPException(status_code=404, detail="Engagement not found")
+    cur.execute("SELECT id FROM stakeholders WHERE id = %s", (payload.stakeholder_id,))
+    if cur.fetchone() is None:
+        raise HTTPException(status_code=404, detail="Stakeholder not found")
 
-        request_id = f"req_{uuid.uuid4().hex}"
-        cur.execute(
-            """
-            INSERT INTO evidence_requests
-                (id, engagement_id, stakeholder_id, control_ref, title, description, status, due_date, sent_at, reminder_count, token, last_activity_at)
-            VALUES (%s, %s, %s, %s, %s, %s, 'not_sent', %s, NULL, 0, NULL, NOW())
-            """,
-            (request_id, payload.engagement_id, payload.stakeholder_id, payload.control_ref, payload.title, payload.description, payload.due_date),
-        )
-        log_activity(cur, request_id, "You", "auditor", "Request created", payload.title)
-        db.commit()
+    request_id = f"req_{uuid.uuid4().hex}"
+    cur.execute(
+        """
+        INSERT INTO evidence_requests
+            (id, engagement_id, stakeholder_id, control_ref, title, description, status, due_date, sent_at, reminder_count, token, last_activity_at)
+        VALUES (%s, %s, %s, %s, %s, %s, 'not_sent', %s, NULL, 0, NULL, NOW())
+        """,
+        (request_id, payload.engagement_id, payload.stakeholder_id, payload.control_ref, payload.title, payload.description, payload.due_date),
+    )
+    log_activity(cur, request_id, "You", "auditor", "Request created", payload.title)
 
     return {
         "id": request_id,
@@ -355,6 +369,49 @@ def create_evidence_request(payload: CreateEvidenceRequestPayload) -> dict[str, 
         "last_activity_at": datetime.now().isoformat(),
         "files": [],
     }
+
+
+@app.post("/evidence-requests", status_code=201)
+def create_evidence_request(payload: CreateEvidenceRequestPayload) -> dict[str, Any]:
+    db = get_db_connection()
+    with db.cursor() as cur:
+        result = _create_evidence_request_row(cur, payload)
+        db.commit()
+    return result
+
+
+class BulkEvidenceRequestItem(BaseModel):
+    stakeholder_id: str
+    control_ref: str
+    title: str
+    description: str
+    due_date: str
+
+
+class BulkCreateEvidenceRequestsPayload(BaseModel):
+    items: list[BulkEvidenceRequestItem]
+
+
+# Turns a reviewed RFI draft list (see /engagements/{id}/generate-rfi) into
+# real evidence_requests rows -- one transaction for the whole batch, same
+# insert + activity-log path as the single-create endpoint above.
+@app.post("/engagements/{engagement_id}/evidence-requests/bulk", status_code=201)
+def bulk_create_evidence_requests(engagement_id: str, payload: BulkCreateEvidenceRequestsPayload) -> dict[str, Any]:
+    db = get_db_connection()
+    created = []
+    with db.cursor() as cur:
+        for item in payload.items:
+            row_payload = CreateEvidenceRequestPayload(
+                engagement_id=engagement_id,
+                stakeholder_id=item.stakeholder_id,
+                control_ref=item.control_ref,
+                title=item.title,
+                description=item.description,
+                due_date=item.due_date,
+            )
+            created.append(_create_evidence_request_row(cur, row_payload))
+        db.commit()
+    return {"created": created}
 
 
 @app.post("/evidence-requests/{request_id}/send", response_model=SendEvidenceRequestResponse)
@@ -571,6 +628,156 @@ def get_engagement(engagement_id: str) -> EngagementResponse:
         )
 
 
+class ScopeQuestionResponse(BaseModel):
+    id: str
+    question: str
+    help_text: str
+    type: str
+    options: list[dict]
+
+
+class FrameworkScopeQuestionsResponse(BaseModel):
+    framework_id: str
+    questions: list[ScopeQuestionResponse]
+
+
+@app.get("/frameworks/{framework_id}/scope-questions", response_model=FrameworkScopeQuestionsResponse)
+def get_framework_scope_questions(framework_id: str) -> FrameworkScopeQuestionsResponse:
+    fw = get_framework(framework_id)
+    if fw is None:
+        raise HTTPException(status_code=404, detail="Unknown framework")
+    return FrameworkScopeQuestionsResponse(
+        framework_id=framework_id,
+        questions=[
+            ScopeQuestionResponse(id=q.id, question=q.question, help_text=q.help_text, type=q.type, options=q.options)
+            for q in fw.scope_questions
+        ],
+    )
+
+
+class ExcludedControl(BaseModel):
+    id: str
+    reason: str
+
+
+class EvidenceChecklistItem(BaseModel):
+    document_type: str
+    label: str
+    reason: str
+    required: bool
+    maps_to: list[str]
+
+
+class ScopeResponse(BaseModel):
+    applicable_controls: list[str]
+    excluded_controls: list[ExcludedControl]
+    evidence_checklist: list[EvidenceChecklistItem]
+
+
+class ComputeScopePayload(BaseModel):
+    frameworks: list[str]
+    scope_answers: dict[str, dict[str, Any]]
+
+
+def ensure_engagement_scope_schema(cur) -> None:
+    """One row per engagement, replaced (upsert) on rerun -- no
+    history/versioning needed for this slice, same as review_decisions'
+    "just re-run DDL idempotently" approach elsewhere in this file."""
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS engagement_scope (
+            engagement_id TEXT PRIMARY KEY REFERENCES engagements(id),
+            frameworks JSONB NOT NULL,
+            scope_answers JSONB NOT NULL,
+            computed_checklist JSONB NOT NULL,
+            computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+
+
+@app.post("/engagements/{engagement_id}/scope", response_model=ScopeResponse)
+def compute_engagement_scope(engagement_id: str, payload: ComputeScopePayload) -> ScopeResponse:
+    bad_frameworks = set(payload.frameworks) - VALID_FRAMEWORKS
+    if bad_frameworks:
+        raise HTTPException(status_code=400, detail=f"Unsupported framework(s): {sorted(bad_frameworks)}")
+
+    db = get_db_connection()
+    with db.cursor() as cur:
+        ensure_engagement_scope_schema(cur)
+        cur.execute("SELECT id FROM engagements WHERE id = %s", (engagement_id,))
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Engagement not found")
+
+        # payload.frameworks uses the API-facing strings (ISO27001/NIST_CSF/
+        # PCI_DSS); compute_scope_multi is keyed by the FrameworkDefinition
+        # registry's own lowercase ids -- the 1:1 mapping VALID_FRAMEWORKS
+        # documents.
+        answers_by_registry_key = {fw.lower(): payload.scope_answers.get(fw, {}) for fw in payload.frameworks}
+        result = compute_scope_multi(answers_by_registry_key)
+
+        cur.execute(
+            """
+            INSERT INTO engagement_scope (engagement_id, frameworks, scope_answers, computed_checklist, computed_at)
+            VALUES (%s, %s, %s, %s, NOW())
+            ON CONFLICT (engagement_id) DO UPDATE SET
+                frameworks = EXCLUDED.frameworks,
+                scope_answers = EXCLUDED.scope_answers,
+                computed_checklist = EXCLUDED.computed_checklist,
+                computed_at = NOW()
+            """,
+            (engagement_id, json.dumps(payload.frameworks), json.dumps(payload.scope_answers), json.dumps(result)),
+        )
+        db.commit()
+
+    return ScopeResponse(**result)
+
+
+@app.get("/engagements/{engagement_id}/scope", response_model=ScopeResponse)
+def get_engagement_scope(engagement_id: str) -> ScopeResponse:
+    db = get_db_connection()
+    with db.cursor() as cur:
+        ensure_engagement_scope_schema(cur)
+        cur.execute("SELECT computed_checklist FROM engagement_scope WHERE engagement_id = %s", (engagement_id,))
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scope has not been computed for this engagement")
+    return ScopeResponse(**row[0])
+
+
+class DraftRfiItem(BaseModel):
+    control_ref: str
+    title: str
+    description: str
+    due_date: str | None = None
+
+
+class GenerateRfiResponse(BaseModel):
+    items: list[DraftRfiItem]
+
+
+@app.post("/engagements/{engagement_id}/generate-rfi", response_model=GenerateRfiResponse)
+def generate_rfi(engagement_id: str) -> GenerateRfiResponse:
+    """Turns the persisted evidence checklist into a draft RFI item list --
+    doesn't write to evidence_requests (see /evidence-requests/bulk for
+    that). No stakeholder assignment here; the frontend assigns one per row
+    before submitting."""
+    db = get_db_connection()
+    with db.cursor() as cur:
+        ensure_engagement_scope_schema(cur)
+        cur.execute("SELECT computed_checklist FROM engagement_scope WHERE engagement_id = %s", (engagement_id,))
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scope has not been computed for this engagement")
+
+    items = []
+    for entry in row[0]["evidence_checklist"]:
+        maps_to = entry.get("maps_to") or []
+        control_ref = maps_to[0] if len(maps_to) == 1 else ", ".join(maps_to)
+        items.append(DraftRfiItem(control_ref=control_ref, title=entry["label"], description=entry["reason"]))
+    return GenerateRfiResponse(items=items)
+
+
 @app.get("/engagements/{engagement_id}/evidence-requests")
 def get_engagement_requests(engagement_id: str):
     return list_requests_for_engagement(engagement_id)
@@ -672,52 +879,6 @@ def get_request_detail_route(request_id: str):
     return detail
 
 
-# Catches unfilled template fields like "[DD-MM-YYYY]" or "[Organization
-# Name]". Deliberately code-based, not AI judgment — the model will happily
-# call a document "complete" even with visible placeholder brackets still in
-# it, so this acts as a hard floor underneath whatever it concludes.
-PLACEHOLDER_PATTERN = re.compile(r"\[[^\[\]\n]{1,50}\]")
-
-COMPLETENESS_RANK = {"insufficient": 0, "partial": 1, "complete": 2}
-
-
-def find_unfilled_placeholders(text: str) -> list[str]:
-    """Unique bracketed spans that look like unfilled template placeholders.
-    Skips brackets containing only digits/punctuation (e.g. "[1]", "[12]")
-    since those are almost always citation/footnote refs, not placeholders —
-    a real placeholder has at least one letter in it."""
-    seen: dict[str, None] = {}
-    for match in PLACEHOLDER_PATTERN.findall(text):
-        inner = match[1:-1].strip()
-        if inner and re.search(r"[A-Za-z]", inner):
-            seen.setdefault(match, None)
-    return list(seen.keys())
-
-
-def apply_placeholder_check(parsed: dict, full_text: str) -> dict:
-    """Caps completeness_label at "partial" and appends a missing_sections
-    note if the document still has unfilled template placeholders — this
-    overrides the AI's own completeness judgment, it doesn't just advise it."""
-    placeholders = find_unfilled_placeholders(full_text)
-    if not placeholders:
-        return parsed
-
-    current_label = parsed.get("completeness_label")
-    if COMPLETENESS_RANK.get(current_label, COMPLETENESS_RANK["complete"]) > COMPLETENESS_RANK["partial"]:
-        parsed["completeness_label"] = "partial"
-
-    missing = parsed.get("missing_sections")
-    missing = list(missing) if isinstance(missing, list) else []
-    shown = ", ".join(placeholders[:5])
-    if len(placeholders) > 5:
-        shown += f", +{len(placeholders) - 5} more"
-    note = f"Document contains unfilled template fields: {shown}."
-    if not any("unfilled template field" in str(m).lower() for m in missing):
-        missing.append(note)
-    parsed["missing_sections"] = missing
-    return parsed
-
-
 def log_activity(cur, request_id: str, actor: str, actor_type: str, action: str, detail: str | None = None) -> None:
     """Appends one row to activity_log. activity_log has existed as a table
     since seed.py's DDL, but nothing ever wrote to it until now -- the
@@ -768,44 +929,28 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
             detail={"message": "Supabase Storage upload failed", "error": str(exc)},
         )
 
+    # extract text from the PDF -- straight from the in-memory bytes just
+    # uploaded, no round trip back to disk or to Supabase needed. Stored
+    # alongside the file below so POST /evidence-files/{id}/analyze doesn't
+    # need a second Supabase round trip to re-extract it later.
+    try:
+        reader = PdfReader(io.BytesIO(contents))
+        text_parts = []
+        for p in reader.pages:
+            page_text = p.extract_text() or ""
+            text_parts.append(page_text)
+        full_text = "\n".join(text_parts)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": "Failed to extract PDF text", "error": str(exc)})
+
     db = get_db_connection()
     # ensure tables exist (simple DDL for local testing)
     with db.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS evidence_files (
-                id TEXT PRIMARY KEY,
-                evidence_request_id TEXT,
-                filename TEXT,
-                path TEXT,
-                size_bytes BIGINT,
-                uploaded_at TIMESTAMPTZ DEFAULT NOW()
-            )
-            """
-        )
-        # Lazy migration for a table created before size_bytes existed, and
-        # before `path` was repurposed to hold a Supabase Storage object key
-        # instead of a local filesystem path.
-        cur.execute("ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS size_bytes BIGINT")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ai_reviews (
-                id TEXT PRIMARY KEY,
-                evidence_file_id TEXT REFERENCES evidence_files(id),
-                document_type TEXT,
-                summary TEXT,
-                suggested_controls JSONB,
-                missing_sections JSONB,
-                completeness_label TEXT,
-                raw_response JSONB,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )
-            """
-        )
+        ensure_evidence_files_schema(cur)
 
         cur.execute(
-            "INSERT INTO evidence_files (id, evidence_request_id, filename, path, size_bytes) VALUES (%s, %s, %s, %s, %s)",
-            (file_id, request_id, storage_key, storage_key, size_bytes),
+            "INSERT INTO evidence_files (id, evidence_request_id, filename, path, size_bytes, extracted_text) VALUES (%s, %s, %s, %s, %s, %s)",
+            (file_id, request_id, storage_key, storage_key, size_bytes, full_text),
         )
 
         cur.execute(
@@ -828,44 +973,162 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
         )
         db.commit()
 
-    # extract text from the PDF -- straight from the in-memory bytes just
-    # uploaded, no round trip back to disk or to Supabase needed.
-    try:
-        reader = PdfReader(io.BytesIO(contents))
-        text_parts = []
-        for p in reader.pages:
-            page_text = p.extract_text() or ""
-            text_parts.append(page_text)
-        full_text = "\n".join(text_parts)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail={"message": "Failed to extract PDF text", "error": str(exc)})
+    # No AI review here anymore -- upload just stores the file. Analysis is
+    # now a separate, control-aware step (see POST
+    # /evidence-files/{file_id}/analyze below); the request's status is left
+    # exactly as it was before this upload, since there's no review yet for
+    # the auditor to act on.
+    return {
+        "evidence_file": {"id": file_id, "filename": storage_key, "path": storage_key, "size_bytes": size_bytes},
+    }
 
-    # Prepare the review prompt. No missing-key check here -- _check_required_env_vars()
-    # already guarantees GROQ_API_KEY is set for the lifetime of the process,
-    # or the app never started.
+
+class AnalyzeEvidenceFileResponse(BaseModel):
+    id: str
+    compliance_status: str
+    current_state: str
+    gap_description: str
+    evidence_quote: str
+    risk_level: str
+    follow_up_evidence: str
+    control_id_matched: str | None = None
+
+
+def ensure_evidence_files_schema(cur) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evidence_files (
+            id TEXT PRIMARY KEY,
+            evidence_request_id TEXT,
+            filename TEXT,
+            path TEXT,
+            size_bytes BIGINT,
+            uploaded_at TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+    # Lazy migration for a table created before size_bytes existed, and
+    # before `path` was repurposed to hold a Supabase Storage object key
+    # instead of a local filesystem path.
+    cur.execute("ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS size_bytes BIGINT")
+    # Holds the PDF's extracted text so /analyze doesn't need a second
+    # Supabase round trip to re-fetch and re-extract it later.
+    cur.execute("ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS extracted_text TEXT")
+
+
+def ensure_ai_reviews_schema(cur) -> None:
+    # ai_reviews.evidence_file_id references evidence_files -- that table
+    # needs to exist first, and on a database nothing has ever been
+    # uploaded to yet, it won't (evidence_files is normally created lazily
+    # by the upload endpoint).
+    ensure_evidence_files_schema(cur)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_reviews (
+            id TEXT PRIMARY KEY,
+            evidence_file_id TEXT REFERENCES evidence_files(id),
+            document_type TEXT,
+            summary TEXT,
+            suggested_controls JSONB,
+            missing_sections JSONB,
+            completeness_label TEXT,
+            raw_response JSONB,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+    # document_type through raw_response above are the old whole-document
+    # summary fields the upload-time review used to populate; left null for
+    # every row created here since this endpoint asks a narrower,
+    # control-scoped question instead (see AnalyzeEvidenceFileResponse).
+    cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS compliance_status TEXT")
+    cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS follow_up_evidence TEXT")
+
+
+# Narrowed from CyberAssess's build_framework_system_prompt/
+# build_framework_user_prompt (one whole framework's controls vs. one full
+# assessment) to one control vs. one uploaded document -- same field set
+# (compliance_status/current_state/gap_description/evidence_quote) plus
+# follow_up_evidence, which that prompt didn't need since it wasn't scoped
+# to a single piece of missing evidence.
+@app.post("/evidence-files/{file_id}/analyze", response_model=AnalyzeEvidenceFileResponse)
+def analyze_evidence_file(file_id: str) -> AnalyzeEvidenceFileResponse:
+    db = get_db_connection()
+    with db.cursor() as cur:
+        ensure_engagement_schema(cur)
+        ensure_ai_reviews_schema(cur)
+        db.commit()
+
+        cur.execute(
+            "SELECT evidence_request_id, extracted_text FROM evidence_files WHERE id = %s",
+            (file_id,),
+        )
+        file_row = cur.fetchone()
+        if file_row is None:
+            raise HTTPException(status_code=404, detail="Evidence file not found")
+        request_id, extracted_text = file_row
+
+        cur.execute(
+            "SELECT control_ref, engagement_id FROM evidence_requests WHERE id = %s",
+            (request_id,),
+        )
+        request_row = cur.fetchone()
+        if request_row is None:
+            raise HTTPException(status_code=404, detail="Evidence request not found")
+        control_ref, engagement_id = request_row
+
+        cur.execute("SELECT framework FROM engagement_frameworks WHERE engagement_id = %s", (engagement_id,))
+        frameworks = [r[0] for r in cur.fetchall()]
+
+    # control_ref is free-text (see main.py's constraints doc, not a foreign
+    # key) -- best-effort lookup against the engagement's registered
+    # frameworks, degrading to a generic prompt rather than erroring if
+    # nothing matches, so an auditor-typed custom ref never breaks analysis.
+    matched_control = None
+    for api_framework in frameworks:
+        fw = get_framework(api_framework.lower())
+        if fw is None:
+            continue
+        matched_control = fw.get_control(control_ref)
+        if matched_control:
+            break
+
+    if matched_control:
+        control_context = (
+            f"Control ID: {matched_control.id}\n"
+            f"Title: {matched_control.title}\n"
+            f"Description: {matched_control.description}\n"
+            f"Reference: {matched_control.reference}"
+        )
+    else:
+        control_context = (
+            f'No specific control reference was matched for control_ref "{control_ref}" -- assess '
+            "this document on its own merits and note what compliance area it appears to address."
+        )
+
     system_msg = (
-        "You are a compliance reviewer. Given the raw extracted text of a policy document, "
-        "return ONLY a JSON object with the following keys: document_type, summary, suggested_controls, missing_sections, completeness_label. "
-        "- document_type: short label like \"access control policy\"\n"
-        "- summary: 3-5 sentence summary\n"
-        "- suggested_controls: array of objects {control_name, confidence_label, rationale} where confidence_label is one of strong_match/partial_match/weak_match\n"
-        "- missing_sections: array of strings\n"
-        "- completeness_label: one of complete/partial/insufficient\n"
+        "You are a compliance auditor assessing whether ONE uploaded document satisfies ONE "
+        "specific control. Given the control being assessed and the raw extracted text of the "
+        "uploaded document, return ONLY a JSON object with the following keys: compliance_status, "
+        "current_state, gap_description, evidence_quote, risk_level, follow_up_evidence.\n"
+        "- compliance_status: one of \"compliant\", \"partially_compliant\", \"non_compliant\", \"not_assessed\"\n"
+        "- current_state: what the document shows the organization currently does (1-2 sentences)\n"
+        "- gap_description: what is missing relative to the control; \"No gap identified.\" if compliant\n"
+        "- evidence_quote: exact text quoted from the document supporting your assessment, or \"No relevant language found\"\n"
+        "- risk_level: one of \"critical\", \"high\", \"medium\", \"low\"\n"
+        "- follow_up_evidence: a specific, concrete description of what to collect next if the "
+        "control isn't fully met (e.g. \"Provide the Q3 2026 access review log showing "
+        "offboarded-user removal within 24 hours\"), never a vague \"provide more documentation\"\n\n"
+        f"## Control Being Assessed\n{control_context}\n\n"
         "Ensure the JSON parses cleanly; do not include any extra commentary."
     )
 
-    # Truncate input to a safe size
+    # Truncate input to a safe size -- same approach as the removed
+    # upload-time review.
     max_chars = 20000
-    doc_text = full_text[:max_chars]
+    doc_text = (extracted_text or "")[:max_chars]
+    prompt = f"Analyze the following document text against the control above:\n---\n{doc_text}\n---\nRespond as JSON per the schema."
 
-    prompt = f"Analyze the following document text:\n---\n{doc_text}\n---\nRespond as JSON per the schema."
-
-    # llama-3.3-70b-versatile (originally requested) isn't in this account's
-    # model catalog -- confirmed via client.models.list(), not assumed;
-    # Groq's lineup turns over. openai/gpt-oss-120b is the largest
-    # instruction-following chat model actually available, and JSON mode
-    # verified working against it directly before wiring it in here.
-    GROQ_MODEL = "openai/gpt-oss-120b"
     try:
         # Groq's chat-completions API is OpenAI-shaped (messages array,
         # response_format for JSON mode) rather than Gemini's
@@ -882,9 +1145,6 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
             response_format={"type": "json_object"},
         )
         assistant_text = completion.choices[0].message.content
-        # Same "raw_response JSONB" shape downstream expects (mapWireAiReview
-        # in apps/web/src/lib/api.ts reads model_resolved/model_requested off
-        # this) -- sourced from Groq now instead of Gemini.
         body = {
             "provider": "groq",
             "model_requested": GROQ_MODEL,
@@ -901,57 +1161,47 @@ def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"message": "Groq API request failed", "error": str(exc)})
 
-    # Code-based floor on completeness_label — runs regardless of what the
-    # model concluded. See apply_placeholder_check / find_unfilled_placeholders.
-    if parsed is not None:
-        parsed = apply_placeholder_check(parsed, full_text)
-
-    # persist ai_review row
+    parsed = parsed or {}
     ai_id = f"ai_{uuid.uuid4().hex}"
     with db.cursor() as cur:
         cur.execute(
-            "INSERT INTO ai_reviews (id, evidence_file_id, document_type, summary, suggested_controls, missing_sections, completeness_label, raw_response) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            (
-                ai_id,
-                file_id,
-                parsed.get("document_type") if parsed else None,
-                parsed.get("summary") if parsed else None,
-                json.dumps(parsed.get("suggested_controls")) if parsed and parsed.get("suggested_controls") is not None else None,
-                json.dumps(parsed.get("missing_sections")) if parsed and parsed.get("missing_sections") is not None else None,
-                parsed.get("completeness_label") if parsed else None,
-                json.dumps(body) if body is not None else None,
-            ),
+            "INSERT INTO ai_reviews (id, evidence_file_id, compliance_status, follow_up_evidence, raw_response) VALUES (%s,%s,%s,%s,%s)",
+            (ai_id, file_id, parsed.get("compliance_status"), parsed.get("follow_up_evidence"), json.dumps(body)),
         )
-        # The request's own status column was otherwise never touched by this
-        # endpoint — it would sit at whatever seed.py/send_magic_link left it
-        # at (e.g. "awaiting_upload") forever, even once a file was uploaded
-        # and analyzed. This is what the review panel's top badge reads, so
-        # it needs to actually reflect that a review now exists and is
-        # waiting on the auditor, not still on the stakeholder.
+        # Same transition the removed upload-time review used to make --
+        # this is now what tells the auditor there's something to review.
         cur.execute(
             "UPDATE evidence_requests SET status = %s, last_activity_at = NOW() WHERE id = %s",
             ("pending_review", request_id),
         )
-        if parsed:
-            flags = len(parsed.get("missing_sections") or [])
-            detail = f"Classified as {parsed.get('document_type', 'unknown document')} — completeness: {parsed.get('completeness_label', 'unknown')}"
-            if flags:
-                detail += f", {flags} item{'s' if flags != 1 else ''} flagged"
-            log_activity(cur, request_id, "AI review", "ai", "AI analysis completed", detail)
-        else:
-            log_activity(cur, request_id, "AI review", "ai", "AI analysis incomplete", "Model response could not be parsed as JSON")
+        log_activity(
+            cur, request_id, "AI review", "ai", "AI analysis completed",
+            f"Control {control_ref}: {parsed.get('compliance_status', 'unknown')}",
+        )
         db.commit()
 
-    return {
-        "evidence_file": {"id": file_id, "filename": storage_key, "path": storage_key, "size_bytes": size_bytes},
-        "ai_review": parsed if parsed else {"raw_response": body},
-    }
+    return AnalyzeEvidenceFileResponse(
+        id=ai_id,
+        compliance_status=parsed.get("compliance_status") or "not_assessed",
+        current_state=parsed.get("current_state") or "",
+        gap_description=parsed.get("gap_description") or "",
+        evidence_quote=parsed.get("evidence_quote") or "",
+        risk_level=parsed.get("risk_level") or "medium",
+        follow_up_evidence=parsed.get("follow_up_evidence") or "",
+        control_id_matched=matched_control.id if matched_control else None,
+    )
 
 
 @app.get("/evidence-requests/{request_id}/review")
 def get_evidence_review(request_id: str):
     db = get_db_connection()
     with db.cursor() as cur:
+        # ai_reviews is only otherwise created lazily inside /analyze now
+        # (upload no longer touches it) -- ensure it exists here too, so
+        # this read doesn't 500 on a request that's been uploaded to but
+        # never analyzed anywhere in this database's lifetime yet.
+        ensure_ai_reviews_schema(cur)
+        db.commit()
         cur.execute(
             "SELECT id, filename, path, uploaded_at FROM evidence_files WHERE evidence_request_id = %s ORDER BY uploaded_at DESC LIMIT 1",
             (request_id,),
