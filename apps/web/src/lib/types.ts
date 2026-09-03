@@ -96,6 +96,90 @@ export interface AiReview {
   suggested_controls?: SuggestedControl[];
   flags: AiFlag[];
   excerpts: AiExcerpt[];
+
+  // --- Control-aware analysis fields (POST /evidence-files/{id}/analyze).
+  // Added alongside the original document-summary fields above rather than
+  // replacing them, so any other view still reading doc_type/summary/flags/
+  // excerpts keeps working (they're derived from these where possible — see
+  // lib/api.ts's mapWireAiReviewInner). Optional because older/legacy
+  // reviews (and the mock-data fallback) never set them.
+  compliance_status?: ComplianceStatus;
+  current_state?: string;
+  gap_description?: string;
+  evidence_quote?: string;
+  risk_level?: string;
+  /** The single most useful field to an auditor deciding what's missing:
+   * a specific, concrete description of what to collect next. */
+  follow_up_evidence?: string;
+  control_id_matched?: string | null;
+}
+
+export type ComplianceStatus = "compliant" | "partially_compliant" | "non_compliant" | "not_assessed";
+
+// --- Scope -> RFI workflow types. Kept deliberately separate from the
+// existing `Framework` type (SOC2/ISO27001, used by engagement creation) —
+// that flow is out of scope for this feature and isn't touched. The scope
+// questionnaire only ever offers these three.
+export type ScopeFramework = "ISO27001" | "NIST_CSF" | "PCI_DSS";
+
+export type ScopeQuestionType = "single_select" | "multi_select";
+
+export interface ScopeQuestionOption {
+  value: string;
+  label: string;
+}
+
+export interface ScopeQuestion {
+  id: string;
+  question: string;
+  help_text: string | null;
+  type: ScopeQuestionType;
+  options: ScopeQuestionOption[];
+}
+
+export interface ExcludedControl {
+  id: string;
+  reason: string;
+}
+
+export interface EvidenceChecklistItem {
+  document_type: string;
+  label: string;
+  reason: string;
+  required: boolean;
+  maps_to: string[];
+}
+
+export interface EngagementScope {
+  applicable_controls: string[];
+  excluded_controls: ExcludedControl[];
+  evidence_checklist: EvidenceChecklistItem[];
+}
+
+/** A single answer for a scope question: a string for `single_select`, a
+ * string array for `multi_select`. */
+export type ScopeAnswerValue = string | string[];
+
+export type ScopeAnswers = Record<ScopeFramework, Record<string, ScopeAnswerValue>>;
+
+export interface RfiDraftItem {
+  control_ref: string;
+  title: string;
+  description: string;
+  due_date: string | null;
+}
+
+/** One row of the editable RFI draft table in the UI -- adds the fields the
+ * auditor must fill in before it can become a real evidence request
+ * (stakeholder + due date), plus a client-only `key` for React list identity
+ * across add/remove/edit. */
+export interface RfiDraftRow {
+  key: string;
+  control_ref: string;
+  title: string;
+  description: string;
+  stakeholder_id: string;
+  due_date: string;
 }
 
 export interface ReviewDecision {
