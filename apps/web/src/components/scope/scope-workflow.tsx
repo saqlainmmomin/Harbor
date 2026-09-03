@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FormField } from "@/components/requests/add-stakeholder-form";
 import {
@@ -68,6 +68,23 @@ export function ScopeWorkflow({
   //  - Back is disabled while a mutation is pending, so there's no
   //    "click Back, then a late success flips the step anyway" race.
   const opRef = useRef(0);
+
+  // Codex review finding #9: the local Back button being disabled while a
+  // mutation is pending isn't enough -- the app-shell sidebar (outside this
+  // component) isn't, so an auditor can navigate away entirely mid-bulk-
+  // create. React unmounts this component on that route change, but the
+  // in-flight handleBulkCreate promise keeps running and, on completion,
+  // used to call router.refresh()/router.push() anyway -- hijacking
+  // whatever page the auditor had already navigated to. Invalidate the
+  // operation token on unmount (same mechanism the opRef comment above
+  // already uses for a superseded operation) so a completion that resolves
+  // after the component is gone is recognized as stale and its result is
+  // ignored, not applied.
+  useEffect(() => {
+    return () => {
+      opRef.current += 1;
+    };
+  }, []);
 
   function toggleFramework(key: ScopeFramework) {
     if (loading) return; // frozen while a load/submit is in flight
@@ -318,7 +335,8 @@ export function ScopeWorkflow({
                         <select
                           value={(answers[fw]?.[q.id] as string) ?? ""}
                           onChange={(e) => setAnswer(fw, q.id, e.target.value)}
-                          className="w-full max-w-sm rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+                          disabled={loading}
+                          className="w-full max-w-sm rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           <option value="">Select…</option>
                           {q.options.map((o) => (
@@ -343,7 +361,8 @@ export function ScopeWorkflow({
                                     on ? current.filter((v) => v !== o.value) : [...current, o.value],
                                   )
                                 }
-                                className={`rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset transition-colors ${
+                                disabled={loading}
+                                className={`rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
                                   on
                                     ? "bg-[var(--accent)] text-[var(--accent-ink)] ring-[var(--accent)]"
                                     : "bg-[var(--surface)] text-[var(--ink-secondary)] ring-[var(--border-strong)] hover:bg-[var(--surface-raised)]"

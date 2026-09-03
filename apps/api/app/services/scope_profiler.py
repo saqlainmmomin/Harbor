@@ -395,12 +395,24 @@ def compute_scope(framework_id: str, scope_answers: dict) -> dict:
     excluded_ids = {e["id"] for e in excluded}
     applicable = [cid for cid in all_ids if cid not in excluded_ids]
 
-    checklist = [
-        item for item in _CHECKLIST_FNS[framework_id]()
-        # Drop checklist items whose controls are entirely excluded -- no
-        # point asking for a document that maps only to out-of-scope controls.
-        if any(cid not in excluded_ids for cid in item["maps_to"])
-    ]
+    # Codex review finding #4: a retained checklist item used to keep its
+    # FULL maps_to list, excluded ids included -- e.g. ISO's
+    # physical_security_docs is retained for a fully-remote engagement
+    # because 5 of its 14 A7 controls are still applicable, but its maps_to
+    # still listed all 14, so generate_rfi (which emits one request per
+    # maps_to id) recreated evidence requests for the 9 controls scope had
+    # just excluded. Filter each retained item's own maps_to against
+    # excluded_ids before it's persisted or used for RFI generation -- only
+    # controls that are actually still in scope should ever reach an RFI.
+    checklist = []
+    for item in _CHECKLIST_FNS[framework_id]():
+        retained_maps_to = [cid for cid in item["maps_to"] if cid not in excluded_ids]
+        # Drop the checklist item entirely if none of its controls are still
+        # in scope -- no point asking for a document that maps only to
+        # out-of-scope controls.
+        if not retained_maps_to:
+            continue
+        checklist.append({**item, "maps_to": retained_maps_to})
 
     return {
         "applicable_controls": applicable,
@@ -429,6 +441,62 @@ def validate_scope_answers_complete(scope_answers_by_framework: dict[str, dict])
             if question.id not in answers:
                 missing.append(question.id)
     return missing
+
+
+def validate_scope_answers(scope_answers_by_framework: dict[str, dict]) -> list[dict]:
+    """Full API-boundary validation of a scope-answers payload, beyond just
+    "is every question answered" (see validate_scope_answers_complete
+    above). Also rejects an answer that IS present but isn't a recognized
+    value for that question -- Codex review finding #5: presence-only
+    validation meant an empty string or garbage value for PCI.SCP.2 (e.g.
+    `""` or `"nonsense"`) was accepted as a real answer and silently read by
+    _compute_pci_dss_exclusions as "confirmed: no e-commerce channels",
+    excluding PCI.6.6 the same way a real "no e-commerce" answer would.
+
+    Checks, per scope_question the selected framework(s) define:
+      - present (same "missing" check as validate_scope_answers_complete)
+      - single_select: the value is a string matching one of the question's
+        own option values
+      - multi_select: the value is a list of strings, each one a
+        recognized option value (an explicit empty list is valid -- "asked
+        and confirmed none", not "unanswered")
+    Also flags any answer key that doesn't correspond to a real
+    scope_question for its framework (a typo'd or stale question id).
+
+    Returns a list of {"question_id", "reason"} dicts; empty means the
+    payload is fully valid. Called by main.py's compute_engagement_scope
+    before persisting or computing anything -- an invalid answer must be
+    rejected outright, not silently coerced into whichever exclusion it
+    happens to fall through to."""
+    errors: list[dict] = []
+    for framework_id, answers in scope_answers_by_framework.items():
+        fw = FRAMEWORKS.get(framework_id)
+        if fw is None:
+            continue
+        known_ids = {q.id for q in fw.scope_questions}
+
+        for question in fw.scope_questions:
+            if question.id not in answers:
+                errors.append({"question_id": question.id, "reason": "missing"})
+                continue
+            value = answers[question.id]
+            valid_values = {opt["value"] for opt in question.options}
+            if question.type == "single_select":
+                if not isinstance(value, str) or value not in valid_values:
+                    errors.append(
+                        {"question_id": question.id, "reason": f"must be one of {sorted(valid_values)}"}
+                    )
+            elif question.type == "multi_select":
+                if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+                    errors.append({"question_id": question.id, "reason": "must be a list of strings"})
+                elif not set(value).issubset(valid_values):
+                    bad = sorted(set(value) - valid_values)
+                    errors.append({"question_id": question.id, "reason": f"unrecognized value(s): {bad}"})
+
+        for question_id in sorted(set(answers) - known_ids):
+            errors.append({"question_id": question_id, "reason": "not a recognized question for this framework"})
+
+    return errors
 
 
 def compute_scope_multi(scope_answers_by_framework: dict[str, dict]) -> dict:

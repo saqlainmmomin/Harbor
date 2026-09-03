@@ -409,9 +409,20 @@ export type UploadEvidenceFileResult =
   | { ok: true }
   | { ok: false; received: boolean; message: string };
 
-export async function uploadEvidenceFile(requestId: string, file: File): Promise<UploadEvidenceFileResult> {
+// `token` is the magic-link credential (see /upload/[token]/page.tsx) for
+// the public stakeholder upload flow; the authenticated auditor re-upload
+// path in review-panel.tsx omits it and relies on authedFetch's bearer
+// token instead. The backend (see main.py's _upload_credential_is_valid)
+// accepts either — Codex review "public upload credential bypass": this
+// endpoint used to accept neither, reachable by request_id alone.
+export async function uploadEvidenceFile(
+  requestId: string,
+  file: File,
+  token?: string,
+): Promise<UploadEvidenceFileResult> {
   const formData = new FormData();
   formData.append("file", file);
+  if (token) formData.append("token", token);
 
   let response: Response;
   try {
@@ -426,23 +437,22 @@ export async function uploadEvidenceFile(requestId: string, file: File): Promise
   if (response.ok) return { ok: true };
 
   let message = `Upload failed (HTTP ${response.status})`;
-  let received = false;
   try {
     const body = await response.json();
     const detail = body?.detail;
     const detailMessage = typeof detail === "string" ? detail : detail?.message;
     if (detailMessage) message = detailMessage;
-    // main.py writes the file to Supabase Storage and inserts the
-    // evidence_files row BEFORE extracting PDF text or calling the review
-    // model (Groq, was Gemini) — so if either of those two specific steps
-    // is what failed, the evidence itself was still received, it just
-    // doesn't have an AI review yet. Any other failure (bad content type,
-    // Supabase Storage itself failing) means nothing was saved.
-    received = detailMessage === "Failed to extract PDF text" || detailMessage === "Groq API request failed";
   } catch {
     // non-JSON error body — keep the generic HTTP-status message
   }
-  return { ok: false, received, message };
+  // PDF extraction now happens BEFORE the file is stored (see main.py's
+  // upload_evidence_file), and a DB-write failure after a successful
+  // upload deletes the just-stored object — every failure path here now
+  // means nothing was actually saved. `received` used to be true for a
+  // "Failed to extract PDF text" response, which told the stakeholder the
+  // auditor would see a file that, post-fix, was never stored at all
+  // (Codex review finding #11). Always report received: false on failure.
+  return { ok: false, received: false, message };
 }
 
 // --- GET /engagements/{id}/activity and /evidence-requests/{id}/activity —

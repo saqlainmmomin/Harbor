@@ -137,3 +137,90 @@ def test_compute_scope_drops_checklist_items_whose_controls_are_all_excluded():
     result = sp.compute_scope("pci_dss", {"PCI.SCP.2": []})
     doc_types = {item["document_type"] for item in result["evidence_checklist"]}
     assert "payment_page_integrity_docs" not in doc_types
+
+
+# --- Codex review finding #4: retained checklist items must not resurrect
+# excluded controls via an unfiltered maps_to list -------------------------
+
+def test_compute_scope_filters_excluded_controls_out_of_retained_checklist_item():
+    """ISO's physical_security_docs (maps_to A7.1-A7.14) is retained for a
+    fully-remote engagement because 5 of its 14 controls stay applicable --
+    but the retained item's own maps_to must only list those 5, not all 14,
+    or generate_rfi (one request per maps_to id) recreates requests for the
+    9 controls scope just excluded."""
+    result = sp.compute_scope("iso27001", {"ISO.SCP.4": "fully_remote"})
+    checklist_by_type = {item["document_type"]: item for item in result["evidence_checklist"]}
+    assert "physical_security_docs" in checklist_by_type, "item should be retained -- some A7 controls still apply"
+    retained_maps_to = set(checklist_by_type["physical_security_docs"]["maps_to"])
+
+    excluded_ids = {e["id"] for e in result["excluded_controls"]}
+    assert not (retained_maps_to & excluded_ids), (
+        f"retained checklist item still maps to excluded controls: {retained_maps_to & excluded_ids}"
+    )
+    # And the still-applicable off-premises controls are exactly what's left.
+    assert retained_maps_to == {"ISO.A7.8", "ISO.A7.9", "ISO.A7.10", "ISO.A7.13", "ISO.A7.14"}
+
+
+def test_generate_rfi_style_control_set_excludes_scoped_out_controls():
+    """End-to-end proxy for generate_rfi (which emits one item per maps_to
+    id across the whole checklist): the full set of controls a fully-remote
+    ISO scope would generate requests for must not include any control
+    scope itself excluded."""
+    result = sp.compute_scope("iso27001", {"ISO.SCP.4": "fully_remote"})
+    excluded_ids = {e["id"] for e in result["excluded_controls"]}
+    all_rfi_controls = {cid for item in result["evidence_checklist"] for cid in item["maps_to"]}
+    assert not (all_rfi_controls & excluded_ids)
+
+
+# --- Codex review finding #5: validate answer types/values, not just
+# presence -------------------------------------------------------------
+
+def test_validate_scope_answers_rejects_empty_string_for_pci_ecommerce():
+    """An empty string is not a valid multi_select answer -- it must be
+    rejected outright, not silently treated as an answered '[]'."""
+    answers = {q.id: "outsourced" if q.id != "PCI.SCP.2" else "" for q in PCI_DSS_DEFINITION.scope_questions}
+    errors = sp.validate_scope_answers({"pci_dss": answers})
+    bad_ids = {e["question_id"] for e in errors}
+    assert "PCI.SCP.2" in bad_ids
+
+
+def test_validate_scope_answers_rejects_garbage_value_for_pci_ecommerce():
+    answers = {q.id: "outsourced" if q.id != "PCI.SCP.2" else "not-a-real-channel" for q in PCI_DSS_DEFINITION.scope_questions}
+    # single string where a list is expected, and not a recognized value either
+    errors = sp.validate_scope_answers({"pci_dss": answers})
+    bad_ids = {e["question_id"] for e in errors}
+    assert "PCI.SCP.2" in bad_ids
+
+
+def test_validate_scope_answers_rejects_unrecognized_single_select_value():
+    answers = {q.id: "x" for q in PCI_DSS_DEFINITION.scope_questions}
+    answers["PCI.SCP.1"] = "not_a_real_option"
+    errors = sp.validate_scope_answers({"pci_dss": answers})
+    bad_ids = {e["question_id"] for e in errors}
+    assert "PCI.SCP.1" in bad_ids
+
+
+def test_validate_scope_answers_accepts_fully_valid_payload():
+    answers = {}
+    for q in PCI_DSS_DEFINITION.scope_questions:
+        if q.type == "multi_select":
+            answers[q.id] = [q.options[0]["value"]]
+        else:
+            answers[q.id] = q.options[0]["value"]
+    errors = sp.validate_scope_answers({"pci_dss": answers})
+    assert errors == []
+
+
+def test_validate_scope_answers_accepts_explicit_empty_multi_select():
+    answers = {}
+    for q in PCI_DSS_DEFINITION.scope_questions:
+        answers[q.id] = [] if q.type == "multi_select" else q.options[0]["value"]
+    errors = sp.validate_scope_answers({"pci_dss": answers})
+    assert errors == []
+
+
+def test_validate_scope_answers_flags_missing_and_unknown_question_ids():
+    errors = sp.validate_scope_answers({"pci_dss": {"PCI.SCP.1": "outsourced", "PCI.NOT_REAL": "x"}})
+    bad_ids = {e["question_id"] for e in errors}
+    assert "PCI.SCP.2" in bad_ids  # missing
+    assert "PCI.NOT_REAL" in bad_ids  # unknown

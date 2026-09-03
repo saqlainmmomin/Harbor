@@ -26,6 +26,7 @@ export default async function UploadPage(props: PageProps<"/upload/[token]">) {
       request={resolution.request}
       stakeholder={resolution.stakeholder}
       auditor={resolution.auditor}
+      token={token}
     />
   );
 }
