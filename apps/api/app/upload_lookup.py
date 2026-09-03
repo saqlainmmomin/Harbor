@@ -39,6 +39,7 @@ class RequestResponse(BaseModel):
     reminder_count: int
     last_activity_at: str
     files: list[dict] = []
+    decision: dict | None = None
 
 
 class UploadLookupResponse(BaseModel):
@@ -149,6 +150,38 @@ def get_request_detail(request_id: str) -> RequestDetailResponse | None:
                     }
                 )
 
+            # review_decisions: real now (POST /evidence-requests/{id}/decision
+            # in main.py writes to it). CREATE TABLE IF NOT EXISTS here too --
+            # this function gets its own fresh connection per call (see
+            # get_db_connection above), so it can't assume main.py's process
+            # has run first.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS review_decisions (
+                    id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL REFERENCES evidence_requests(id),
+                    decision TEXT NOT NULL CHECK (decision IN ('approve','reject','request_more')),
+                    note TEXT,
+                    decided_by TEXT NOT NULL,
+                    decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "SELECT id, decision, note, decided_by, decided_at FROM review_decisions WHERE request_id = %s ORDER BY decided_at DESC LIMIT 1",
+                (request_id,),
+            )
+            decision_row = cur.fetchone()
+            decision = None
+            if decision_row:
+                decision = {
+                    "id": decision_row[0],
+                    "decision": decision_row[1],
+                    "note": decision_row[2],
+                    "decided_by": decision_row[3],
+                    "decided_at": decision_row[4].isoformat() if decision_row[4] else "",
+                }
+
             request = RequestResponse(
                 id=row[0],
                 engagement_id=row[1],
@@ -162,6 +195,7 @@ def get_request_detail(request_id: str) -> RequestDetailResponse | None:
                 reminder_count=row[9],
                 last_activity_at=row[10].isoformat() if row[10] else "",
                 files=files,
+                decision=decision,
             )
 
             cur.execute(
@@ -273,6 +307,38 @@ def list_requests_for_engagement(engagement_id: str) -> dict:
                             "created_at": r[7].isoformat() if r[7] else "",
                         }
 
+                # Real now -- see get_request_detail's comment on the same
+                # lazy CREATE TABLE (this function has its own connection,
+                # can't assume that one has run).
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS review_decisions (
+                        id TEXT PRIMARY KEY,
+                        request_id TEXT NOT NULL REFERENCES evidence_requests(id),
+                        decision TEXT NOT NULL CHECK (decision IN ('approve','reject','request_more')),
+                        note TEXT,
+                        decided_by TEXT NOT NULL,
+                        decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    "SELECT id, decision, note, decided_by, decided_at FROM review_decisions WHERE request_id = %s ORDER BY decided_at DESC LIMIT 1",
+                    (request_id,),
+                )
+                d = cur.fetchone()
+                decision = (
+                    {
+                        "id": d[0],
+                        "decision": d[1],
+                        "note": d[2],
+                        "decided_by": d[3],
+                        "decided_at": d[4].isoformat() if d[4] else "",
+                    }
+                    if d
+                    else None
+                )
+
                 requests.append(
                     {
                         "id": request_id,
@@ -288,7 +354,7 @@ def list_requests_for_engagement(engagement_id: str) -> dict:
                         "last_activity_at": last_activity_at.isoformat() if last_activity_at else "",
                         "files": files,
                         "ai_review": ai_review,
-                        "decision": None,
+                        "decision": decision,
                     }
                 )
 
@@ -304,3 +370,57 @@ def list_requests_for_engagement(engagement_id: str) -> dict:
                 ]
 
             return {"requests": requests, "stakeholders": stakeholders}
+
+
+def list_evidence_files_for_engagement(engagement_id: str) -> dict:
+    """Powers the Evidence page (GET /engagements/{id}/evidence-files) --
+    every real file across every request in the engagement, flattened, each
+    carrying its request/control context and latest AI review so the list
+    doesn't need a second round trip per row."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT f.id, f.filename, f.size_bytes, f.uploaded_at,
+                       r.id, r.title, r.control_ref
+                FROM evidence_files f
+                JOIN evidence_requests r ON f.evidence_request_id = r.id
+                WHERE r.engagement_id = %s
+                ORDER BY f.uploaded_at DESC
+                """,
+                (engagement_id,),
+            )
+            rows = cur.fetchall()
+
+            files = []
+            for file_id, filename, size_bytes, uploaded_at, request_id, request_title, control_ref in rows:
+                cur.execute(
+                    """
+                    SELECT document_type, completeness_label, missing_sections
+                    FROM ai_reviews WHERE evidence_file_id = %s
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (file_id,),
+                )
+                r = cur.fetchone()
+                ai_review = None
+                if r:
+                    ai_review = {
+                        "document_type": r[0],
+                        "completeness_label": r[1],
+                        "flag_count": len(r[2]) if r[2] else 0,
+                    }
+                files.append(
+                    {
+                        "id": file_id,
+                        "filename": filename,
+                        "size_bytes": size_bytes or 0,
+                        "uploaded_at": uploaded_at.isoformat() if uploaded_at else "",
+                        "request_id": request_id,
+                        "request_title": request_title,
+                        "control_ref": control_ref,
+                        "ai_review": ai_review,
+                    }
+                )
+
+            return {"files": files}

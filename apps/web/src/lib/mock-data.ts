@@ -11,9 +11,12 @@ export const TODAY = new Date("2026-07-29T09:00:00Z");
 
 export const engagement: Engagement = {
   id: "eng_001",
-  name: "SOC 2 Type II — FY26",
+  name: "SOC 2 Type II, FY26",
   client_name: "Northwind Logistics, Inc.",
-  framework: "SOC2",
+  industry: null,
+  company_size: null,
+  description: null,
+  frameworks: ["SOC2"],
   period_start: "2025-07-01",
   period_end: "2026-06-30",
   lead_auditor: "A. Rao",
@@ -53,7 +56,7 @@ export const evidenceRequests: EvidenceRequest[] = [
     id: "req_014",
     engagement_id: "eng_001",
     control_ref: "CC6.2",
-    title: "Q2 user access review — production AWS accounts",
+    title: "Q2 user access review: production AWS accounts",
     description:
       "Export of the quarterly access review for all production AWS accounts, including reviewer sign-off and any revocations actioned.",
     stakeholder_id: "s1",
@@ -99,7 +102,7 @@ export const evidenceRequests: EvidenceRequest[] = [
           severity: "blocker",
           title: "Revocations not evidenced as completed",
           detail:
-            "7 users are marked 'revoke — pending'. No ticket IDs, timestamps, or confirmation export show the removals were actually performed. Testing operating effectiveness for CC6.3 requires completion evidence.",
+            "7 users are marked 'revoke, pending'. No ticket IDs, timestamps, or confirmation export show the removals were actually performed. Testing operating effectiveness for CC6.3 requires completion evidence.",
           location: "p.4 §3 (Disposition table)",
         },
         {
@@ -115,7 +118,7 @@ export const evidenceRequests: EvidenceRequest[] = [
           severity: "warning",
           title: "Review period does not cover full quarter",
           detail:
-            "Header states the review covers 15 Apr – 30 Jun 2026. The first two weeks of the quarter (1–14 Apr) are not covered by this or any other submitted evidence.",
+            "Header states the review covers 15 Apr to 30 Jun 2026. The first two weeks of the quarter (1 to 14 Apr) are not covered by this or any other submitted evidence.",
           location: "p.1 (Header)",
         },
         {
@@ -130,11 +133,11 @@ export const evidenceRequests: EvidenceRequest[] = [
       excerpts: [
         {
           location: "p.1",
-          text: "Quarterly User Access Review — Production Environments. Review period: 15 Apr 2026 – 30 Jun 2026. Prepared by: M. Webb, IT Manager.",
+          text: "Quarterly User Access Review: Production Environments. Review period: 15 Apr 2026 to 30 Jun 2026. Prepared by: M. Webb, IT Manager.",
         },
         {
           location: "p.4 §3",
-          text: "j.calloway — Contractor — Last login 2026-02-11 — Disposition: REVOKE (pending)",
+          text: "j.calloway | Contractor | Last login 2026-02-11 | Disposition: REVOKE (pending)",
         },
         {
           location: "p.6",
@@ -148,7 +151,7 @@ export const evidenceRequests: EvidenceRequest[] = [
     id: "req_011",
     engagement_id: "eng_001",
     control_ref: "CC8.1",
-    title: "Change management tickets — sample of 25 production deploys",
+    title: "Change management tickets: sample of 25 production deploys",
     description:
       "Ticket records for a sample of 25 production changes showing approval, testing evidence, and deployment timestamp.",
     stakeholder_id: "s2",
@@ -192,7 +195,7 @@ export const evidenceRequests: EvidenceRequest[] = [
       excerpts: [
         {
           location: "Row 12",
-          text: "CHG-4471 | Emergency hotfix — payment queue | Deployed 2026-02-03 22:14 | Approved 2026-02-04 08:02 by P. Nandakumar",
+          text: "CHG-4471 | Emergency hotfix: payment queue | Deployed 2026-02-03 22:14 | Approved 2026-02-04 08:02 by P. Nandakumar",
         },
       ],
     },
@@ -202,7 +205,7 @@ export const evidenceRequests: EvidenceRequest[] = [
     id: "req_007",
     engagement_id: "eng_001",
     control_ref: "CC6.3",
-    title: "Termination checklist — all leavers in period",
+    title: "Termination checklist: all leavers in period",
     description: "Completed offboarding checklists evidencing access removal within 24 hours of termination.",
     stakeholder_id: "s3",
     status: "changes_requested",
@@ -257,7 +260,7 @@ export const evidenceRequests: EvidenceRequest[] = [
     id: "req_003",
     engagement_id: "eng_001",
     control_ref: "CC6.1",
-    title: "MFA enforcement configuration — identity provider",
+    title: "MFA enforcement configuration: identity provider",
     description: "Screenshot or config export showing MFA enforced for all users on the corporate IdP.",
     stakeholder_id: "s4",
     status: "approved",
@@ -284,12 +287,12 @@ export const evidenceRequests: EvidenceRequest[] = [
       doc_type: "IdP Configuration Export",
       doc_type_alternatives: ["Security Policy Screenshot"],
       summary:
-        "Two-page policy export dated 12 Jul 2026 showing a conditional access policy 'Require MFA — All Users' in Enabled state, scoped to all users with no exclusion groups.",
+        "Two-page policy export dated 12 Jul 2026 showing a conditional access policy 'Require MFA (All Users)' in Enabled state, scoped to all users with no exclusion groups.",
       completeness: "complete",
       suggested_control_refs: ["CC6.1"],
       flags: [],
       excerpts: [
-        { location: "p.1", text: "Policy: Require MFA — All Users | State: Enabled | Excluded groups: none" },
+        { location: "p.1", text: "Policy: Require MFA (All Users) | State: Enabled | Excluded groups: none" },
       ],
     },
     decision: {
@@ -330,7 +333,7 @@ export const evidenceRequests: EvidenceRequest[] = [
     id: "req_009",
     engagement_id: "eng_001",
     control_ref: "CC7.2",
-    title: "Security monitoring alert log — sample of 20 alerts",
+    title: "Security monitoring alert log: sample of 20 alerts",
     description: "Alert records showing detection, triage, and resolution for a sample of 20 alerts.",
     stakeholder_id: "s4",
     status: "awaiting_upload",
@@ -362,7 +365,7 @@ export const evidenceRequests: EvidenceRequest[] = [
     id: "req_013",
     engagement_id: "eng_001",
     control_ref: "CC9.2",
-    title: "Vendor risk assessments — critical vendors",
+    title: "Vendor risk assessments: critical vendors",
     description: "Most recent risk assessment and SOC 2 report review for each critical vendor.",
     stakeholder_id: "s5",
     status: "awaiting_upload",
@@ -410,7 +413,7 @@ export const evidenceRequests: EvidenceRequest[] = [
     id: "req_008",
     engagement_id: "eng_001",
     control_ref: "CC6.1",
-    title: "Firewall rule set export — production VPC",
+    title: "Firewall rule set export: production VPC",
     description: "Current security group and network ACL configuration for production.",
     stakeholder_id: "s2",
     status: "rejected",
@@ -470,7 +473,7 @@ export const evidenceRequests: EvidenceRequest[] = [
     id: "req_004",
     engagement_id: "eng_001",
     control_ref: "CC6.1",
-    title: "Sign-in logs — sample of 30 privileged sessions",
+    title: "Sign-in logs: sample of 30 privileged sessions",
     description: "Authentication logs evidencing MFA challenge for privileged accounts.",
     stakeholder_id: "s4",
     status: "approved",
@@ -539,7 +542,7 @@ export const activityLog: ActivityEntry[] = [
     actor: "System",
     actor_type: "system",
     action: "Reminder sent",
-    detail: "Automated reminder — 2 days before due date",
+    detail: "Automated reminder: 2 days before due date",
     created_at: "2026-07-22T06:00:00Z",
   },
   {
@@ -566,7 +569,7 @@ export const activityLog: ActivityEntry[] = [
     actor: "AI review",
     actor_type: "ai",
     action: "Analysis completed",
-    detail: "Classified as Access Review Export — completeness: partial, 4 flags raised",
+    detail: "Classified as Access Review Export, completeness: partial, 4 flags raised",
     created_at: "2026-07-28T16:41:00Z",
   },
 ];

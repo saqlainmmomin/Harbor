@@ -1,7 +1,14 @@
 @import "tailwindcss";
 
-/* MVP is light-mode only — dark mode is a v2 item, so there is deliberately
-   no prefers-color-scheme block here. */
+/* Single light theme, shared by the whole app -- the landing page's warm,
+   off-white palette (see components/landing/*) extended to the signed-in
+   app so there's one consistent visual language end to end, not a public
+   light site bolted onto a separate dark product. Every touched component
+   consumes these tokens via bg-[var(--x)] arbitrary-value classes rather
+   than hardcoded colors, so this file is the single place the palette
+   lives. /upload/[token] and sign-in/sign-up predate this system and still
+   use their own plain Tailwind slate classes -- they're the one deliberate
+   exception, left alone since they're short-lived, unauthenticated pages. */
 
 @theme inline {
   --font-sans: var(--font-inter);
@@ -12,6 +19,174 @@ html {
 }
 
 body {
-  background: #f8fafc; /* slate-50 */
-  color: #0f172a; /* slate-900 */
+  background: #faf8f5;
+  color: #14171c;
+}
+
+:root {
+  /* base surfaces -- warm off-white canvas, white cards, a slightly deeper
+     cream for hover/alt-row states. Same values as the landing page. */
+  --bg: #faf8f5;
+  --surface: #ffffff;
+  --surface-raised: #f2efea;
+  --border: #ebe7e0;
+  --border-strong: #ddd7cb;
+
+  /* text -- warm charcoal, not pure black/grey, to match the landing copy */
+  --ink: #14171c;
+  --ink-secondary: #5b5647;
+  --ink-muted: #8a8578;
+  --ink-faint: #ada795;
+
+  /* brand accent -- ink black, the same #14171C/#2A2E36 used for every CTA
+     on the landing page (and inside its product-visualization mockup).
+     Previously this was Pine green, which put green and amber/yellow
+     status colors right next to each other everywhere (buttons, active
+     nav, progress bars) and made the app read as a different, more
+     colorful product than the landing page it opens from. Now the accent
+     is neutral and color is reserved for semantic status only. */
+  --accent: #14171c;
+  --accent-hover: #2a2e36;
+  --accent-ink: #ffffff;
+
+  /* status/severity -- light-surface-tuned: tinted background + saturated
+     ink, same hue per status. "Emerald" (approved/complete) is its own
+     real green now, independent of --accent -- with the accent neutral,
+     tying success to a hue nothing else in the UI uses reads unambiguously
+     as "done", the way it wouldn't if success were still colored the same
+     as every button. */
+  --status-neutral-bg: #f2efea;
+  --status-neutral-ink: #5b5647;
+  --status-neutral-ring: #ddd7cb;
+
+  --status-violet-bg: #ede9fb;
+  --status-violet-ink: #6d4fc2;
+  --status-violet-ring: #d9d0f5;
+  --status-violet-dot: #8b5cf6;
+
+  --status-amber-bg: #fbeecd;
+  --status-amber-ink: #8a5a0b;
+  --status-amber-ring: #f0dca4;
+  --status-amber-dot: #d99a1f;
+
+  --status-orange-bg: #fbe3d1;
+  --status-orange-ink: #9a4a12;
+  --status-orange-ring: #f0c39e;
+  --status-orange-dot: #e2711d;
+
+  --status-emerald-bg: #e3eee8;
+  --status-emerald-ink: #2e4c3b;
+  --status-emerald-ring: #c7dbce;
+  --status-emerald-dot: #3a5f4a;
+
+  --status-rose-bg: #fbe7e9;
+  --status-rose-ink: #9f1d2c;
+  --status-rose-ring: #f3c6cb;
+  --status-rose-dot: #d92d3f;
+
+  /* Card/section radius and shadow, consolidated to one scale so the visual
+     refinement pass has one place to live instead of per-component magic
+     numbers. -card was 18px everywhere (rounder than the 10-14px an
+     enterprise surface reads as); -hover replaces a few dramatic
+     translate-y + 20-30px-blur hover shadows with one restrained elevation
+     step, used sparingly. */
+  --radius-card: 12px;
+  --shadow-subtle: 0 1px 2px rgba(20, 23, 28, 0.04);
+  --shadow-hover: 0 4px 12px -4px rgba(20, 23, 28, 0.10);
+
+  /* Motion system -- one easing/duration scale reused everywhere below
+     instead of per-component magic numbers, deliberately close to what
+     Tailwind's own transition-colors/transition-all defaults already use
+     (150ms, ease-in-out-ish cubic-bezier) so most of the app's existing
+     hover states were already close to this without any change. */
+  --ease-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 150ms;
+  --duration-base: 180ms;
+  --duration-slow: 220ms;
+}
+
+/* --- Motion system: keyframes + utility classes ---------------------------
+   opacity/transform only throughout (GPU-friendly, no width/height/layout
+   animation) except the skeleton shimmer, which animates background-position
+   -- cheap, and there's no transform-based way to fake a sweep highlight. */
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes logo-pulse {
+  from {
+    opacity: 0.85;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.animate-page-enter {
+  animation: page-enter var(--duration-slow) var(--ease-out);
+}
+
+.animate-logo-pulse {
+  animation: logo-pulse 250ms var(--ease-out);
+}
+
+.animate-fade-in {
+  animation: fade-in var(--duration-base) var(--ease-out);
+}
+
+/* Neutral shimmer skeleton -- for the one loading state the app already
+   shows a spinner for (upload submit); not introduced anywhere new. */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface-raised) 25%,
+    var(--border) 50%,
+    var(--surface-raised) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+
+/* Respect prefers-reduced-motion: reduce -- one blanket override rather than
+   guarding every animation/transition individually. Durations go effectively
+   to zero instead of `animation: none` so end states (opacity/transform
+   final values) still apply immediately -- content doesn't get stuck
+   mid-transition or invisible. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

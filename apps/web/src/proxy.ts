@@ -15,11 +15,12 @@ import { clerkMiddleware } from "@clerk/nextjs/server";
 export default clerkMiddleware();
 
 export const config = {
-  // Only initialize Clerk on routes that need it. "/" is included so it can
-  // call auth() itself and redirect straight to /sign-in or /engagements
-  // without an extra unauthenticated hop first (see src/app/page.tsx).
-  // /upload/[token] is deliberately NOT here — genuinely zero Clerk
-  // involvement, matching the requirement that stakeholders uploading
-  // evidence never touch Clerk.
-  matcher: ["/", "/engagements(.*)", "/sign-in(.*)", "/sign-up(.*)"],
+  // Only initialize Clerk on routes that need it. "/" is a fully public
+  // landing page now (no auth check at all -- see src/app/page.tsx) and
+  // /upload/[token] is the stakeholder magic-link flow -- both get
+  // genuinely zero Clerk involvement, not just "unauthenticated but let
+  // through". Removing "/" from this matcher is also a small win against
+  // the documented Clerk dev-instance handshake quirk: the root route can
+  // no longer contribute an extra hop to that redirect chain.
+  matcher: ["/engagements(.*)", "/sign-in(.*)", "/sign-up(.*)"],
 };

@@ -11,7 +11,13 @@ python-dotenv==1.2.2
 python-multipart==0.0.32
 resend==2.35.0
 pypdf==3.15.0
-google-generativeai==0.8.6
+# Replaced google-generativeai (Gemini) -- its free tier is a hard
+# 20-requests/day cap per Google Cloud project, and that was blocking
+# real testing (confirmed exhausted across multiple fresh projects, not
+# fixable by rotating keys). Groq's free tier is materially higher and
+# needs no billing info on file. Same job: one JSON-mode chat completion
+# per uploaded document, see the review pipeline in app/main.py.
+groq==1.7.0
 # bumped from 2.9.0 by installing supabase==2.31.0 (below), which requires a
 # newer pydantic-core than fastapi==0.115.0 originally pinned against.
 # Verified fastapi + pytest + a live server boot all still work at 2.13.5.

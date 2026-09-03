@@ -1,70 +1,89 @@
 import Link from "next/link";
-import { DEFAULT_ENGAGEMENT_ID } from "@/lib/config";
+import { Topbar } from "@/components/topbar";
+import { SidebarNav, type NavItem } from "@/components/sidebar-nav";
+import { EngagementSwitcher } from "@/components/engagement-switcher";
+import { LogoMotion } from "@/components/logo-motion";
+import { PageTransition } from "@/components/page-transition";
 
-const NAV = [
-  { label: "Evidence dashboard", href: `/engagements/${DEFAULT_ENGAGEMENT_ID}`, ready: true },
-  { label: "Control checklist", href: "#", ready: false },
-  { label: "Stakeholders", href: "#", ready: false },
-  { label: "Activity log", href: "#", ready: false },
-  { label: "Report pack", href: "#", ready: false },
-];
+function navFor(engagementId: string): { primary: NavItem[]; secondary: NavItem[] } {
+  const base = `/engagements/${engagementId}`;
+  return {
+    // Every item here is a real page backed by real data. Workpapers,
+    // Reports, Integrations, and a notifications bell used to live here as
+    // "not built yet" placeholders -- removed rather than dressed up, since
+    // there's no API behind them and a page that can never do anything real
+    // is worse than no page at all.
+    primary: [
+      { label: "Overview", href: base },
+      { label: "Evidence", href: `${base}/evidence` },
+      { label: "Requests", href: `${base}/requests` },
+      { label: "Controls", href: `${base}/controls` },
+      { label: "Findings", href: `${base}/findings` },
+    ],
+    secondary: [
+      { label: "Activity", href: `${base}/activity` },
+      { label: "Settings", href: `${base}/settings` },
+    ],
+  };
+}
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({
+  engagementId,
+  engagementName,
+  engagementSubtitle,
+  userName,
+  userInitials,
+  userEmail,
+  children,
+}: {
+  engagementId: string;
+  engagementName: string | null;
+  engagementSubtitle: string | null;
+  userName: string;
+  userInitials: string;
+  userEmail: string | null;
+  children: React.ReactNode;
+}) {
+  const nav = navFor(engagementId);
+
   return (
-    <div className="flex min-h-screen">
-      <aside className="hidden w-56 shrink-0 flex-col border-r border-slate-200 bg-white lg:flex">
-        <div className="flex h-14 items-center gap-2 border-b border-slate-200 px-4">
-          <span className="flex size-6 items-center justify-center rounded bg-slate-900 text-[11px] font-bold text-white">
-            AC
-          </span>
-          <span className="text-sm font-semibold tracking-tight">Audit Copilot</span>
+    <div className="flex min-h-screen bg-[var(--bg)]">
+      <aside className="hidden w-60 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)] lg:flex">
+        <div className="flex h-14 items-center border-b border-[var(--border)] px-4">
+          <Link href={`/engagements/${engagementId}`} className="flex items-center">
+            <LogoMotion className="text-[22px] leading-none" />
+          </Link>
         </div>
 
-        <nav className="flex-1 p-3">
-          <p className="px-2 pb-2 text-[11px] font-semibold tracking-wide text-slate-400 uppercase">
-            Engagement
-          </p>
-          <ul className="space-y-0.5">
-            {NAV.map((item) =>
-              item.ready ? (
-                <li key={item.label}>
-                  <Link
-                    href={item.href}
-                    className="block rounded-md bg-slate-100 px-2 py-1.5 text-sm font-medium text-slate-900"
-                  >
-                    {item.label}
-                  </Link>
-                </li>
-              ) : (
-                <li
-                  key={item.label}
-                  className="flex items-center justify-between rounded-md px-2 py-1.5 text-sm text-slate-400"
-                  title="Not built in this prototype"
-                >
-                  {item.label}
-                  <span className="rounded bg-slate-100 px-1 text-[10px] font-medium text-slate-400">
-                    soon
-                  </span>
-                </li>
-              ),
-            )}
-          </ul>
+        <nav className="flex-1 overflow-y-auto p-3">
+          <SidebarNav primary={nav.primary} secondary={nav.secondary} />
         </nav>
 
-        <div className="border-t border-slate-200 p-3">
-          <div className="flex items-center gap-2 px-1">
-            <span className="flex size-7 items-center justify-center rounded-full bg-slate-900 text-[11px] font-semibold text-white">
-              AR
+        <div className="border-t border-[var(--border)] p-3">
+          <EngagementSwitcher engagementName={engagementName} />
+          <Link
+            href="/engagements/new"
+            className="mb-3 flex items-center justify-center gap-1.5 rounded-[10px] border border-[var(--border)] py-1.5 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface-raised)] hover:text-[var(--ink)]"
+          >
+            + New engagement
+          </Link>
+
+          <div className="flex items-center gap-2 rounded-[10px] px-1.5 py-1.5 transition-colors duration-150 hover:bg-[var(--surface-raised)]">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[var(--surface-raised)] text-[11px] font-semibold text-[var(--ink-secondary)]">
+              {userInitials}
             </span>
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium">A. Rao</p>
-              <p className="truncate text-xs text-slate-500">Lead auditor</p>
+              <p className="truncate text-sm font-medium text-[var(--ink)]">{userName}</p>
+              {userEmail && <p className="truncate text-xs text-[var(--ink-muted)]">{userEmail}</p>}
             </div>
           </div>
         </div>
       </aside>
 
-      <div className="min-w-0 flex-1">{children}</div>
+      <div className="min-w-0 flex-1">
+        <Topbar engagementId={engagementId} engagementName={engagementName} engagementSubtitle={engagementSubtitle} />
+        <PageTransition>{children}</PageTransition>
+      </div>
     </div>
   );
 }

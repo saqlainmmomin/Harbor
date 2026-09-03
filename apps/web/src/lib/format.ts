@@ -1,4 +1,4 @@
-import type { CompletenessLabel, DecisionType, RequestStatus } from "./types";
+import type { CompletenessLabel, DecisionType, Framework, RequestStatus } from "./types";
 
 // Real wall-clock time. The old mock-data.ts `TODAY` constant froze this at
 // 2026-07-29 so the seeded demo rows' overdue/due-soon states stayed stable
@@ -29,7 +29,7 @@ export function formatDateTime(iso: string): string {
 }
 
 export function formatPeriod(start: string, end: string): string {
-  return `${formatDate(start)} – ${formatDate(end)}`;
+  return `${formatDate(start)} to ${formatDate(end)}`;
 }
 
 export function formatBytes(bytes: number): string {
@@ -84,4 +84,9 @@ export const DECISION_LABEL: Record<DecisionType, string> = {
   approve: "Approved",
   reject: "Rejected",
   request_more: "More evidence requested",
+};
+
+export const FRAMEWORK_LABEL: Record<Framework, string> = {
+  SOC2: "SOC 2",
+  ISO27001: "ISO 27001",
 };

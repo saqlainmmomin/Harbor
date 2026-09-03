@@ -2,13 +2,23 @@
 
 import { useRef, useState } from "react";
 import { formatBytes, formatDate, dueLabel } from "@/lib/format";
+import { uploadEvidenceFile } from "@/lib/api";
 import type { AuditorContact } from "@/lib/upload-link";
 import type { EvidenceRequest, Stakeholder } from "@/lib/types";
+
+type FileStatus = "pending" | "uploading" | "done" | "error";
 
 interface PickedFile {
   id: string;
   name: string;
   size: number;
+  file: File;
+  status: FileStatus;
+  errorMessage?: string;
+  /** true when the backend confirms the file was actually saved even
+   * though the overall request errored (PDF extraction / the review model
+   * failed after storage — see uploadEvidenceFile's `received` flag). */
+  received?: boolean;
 }
 
 let fileCounter = 0;
@@ -62,7 +72,7 @@ function AlreadyDone({ request, auditor }: { request: EvidenceRequest; auditor: 
           <h1 className="mt-4 text-lg font-semibold text-slate-900">Already taken care of</h1>
           <p className="mt-2 text-sm text-slate-600">
             &ldquo;{request.title}&rdquo; was reviewed and accepted. There&apos;s nothing further needed
-            from you here — thanks again for sending it over.
+            from you here. Thanks again for sending it over.
           </p>
         </div>
       </div>
@@ -82,7 +92,10 @@ function UploadForm({
   const [files, setFiles] = useState<PickedFile[]>([]);
   const [note, setNote] = useState("");
   const [dragging, setDragging] = useState(false);
-  const [stage, setStage] = useState<"form" | "submitting" | "done">("form");
+  // "done" isn't a stage value anymore -- whether everything succeeded is
+  // derived from each file's own status (see allDone/anyFailed below), since
+  // a submit pass can now genuinely partially fail per file.
+  const [stage, setStage] = useState<"form" | "submitting">("form");
   const inputRef = useRef<HTMLInputElement>(null);
 
   const askedForMore =
@@ -92,7 +105,13 @@ function UploadForm({
 
   function addFiles(list: FileList | null) {
     if (!list) return;
-    const picked = Array.from(list).map((f) => ({ id: nextId(), name: f.name, size: f.size }));
+    const picked = Array.from(list).map((f) => ({
+      id: nextId(),
+      name: f.name,
+      size: f.size,
+      file: f,
+      status: "pending" as FileStatus,
+    }));
     setFiles((prev) => [...prev, ...picked]);
   }
 
@@ -100,21 +119,42 @@ function UploadForm({
     setFiles((prev) => prev.filter((f) => f.id !== id));
   }
 
-  function submit() {
+  // Sequential, one request per file — the backend only accepts one file
+  // per call. Files already "done" from a previous pass are skipped, so
+  // clicking submit again after a partial failure only retries what failed.
+  async function submit() {
     if (files.length === 0) return;
     setStage("submitting");
-    // Prototype only — a real submit posts to the upload API and polls job status.
-    setTimeout(() => setStage("done"), 1100);
+
+    for (const f of files) {
+      if (f.status === "done") continue;
+      setFiles((prev) => prev.map((x) => (x.id === f.id ? { ...x, status: "uploading" } : x)));
+      const result = await uploadEvidenceFile(request.id, f.file);
+      setFiles((prev) =>
+        prev.map((x) =>
+          x.id === f.id
+            ? result.ok
+              ? { ...x, status: "done", errorMessage: undefined }
+              : { ...x, status: "error", errorMessage: result.message, received: result.received }
+            : x,
+        ),
+      );
+    }
+
+    setStage("form");
   }
 
-  if (stage === "done") {
+  const allDone = files.length > 0 && files.every((f) => f.status === "done");
+  const anyFailed = files.some((f) => f.status === "error");
+
+  if (allDone) {
     return (
       <Shell auditor={auditor}>
         <div className="px-6 py-10 text-center sm:px-8">
           <div className="mx-auto flex size-12 items-center justify-center rounded-full bg-emerald-50">
             <CheckIcon className="size-6 text-emerald-600" />
           </div>
-          <h1 className="mt-4 text-lg font-semibold text-slate-900">Thanks — we&apos;ve got it</h1>
+          <h1 className="mt-4 text-lg font-semibold text-slate-900">Thanks, we&apos;ve got it</h1>
           <p className="mt-2 text-sm text-slate-600">
             {files.length} file{files.length > 1 ? "s" : ""} sent to {auditor.name.split(" ")[0]}.
             You&apos;ll hear back if anything else is needed.
@@ -209,11 +249,12 @@ function UploadForm({
           <p className="mt-2 text-sm font-medium text-slate-700">
             Drop files here, or <span className="text-slate-900 underline">browse</span>
           </p>
-          <p className="mt-1 text-xs text-slate-400">PDF, spreadsheet, image, or export file</p>
+          <p className="mt-1 text-xs text-slate-400">PDF files only</p>
           <input
             ref={inputRef}
             id="file-input"
             type="file"
+            accept="application/pdf"
             multiple
             className="sr-only"
             onChange={(e) => {
@@ -226,25 +267,42 @@ function UploadForm({
         {files.length > 0 && (
           <ul className="mt-3 space-y-1.5">
             {files.map((f) => (
-              <li
-                key={f.id}
-                className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-              >
-                <FileIcon className="size-4 shrink-0 text-slate-400" />
-                <span className="min-w-0 flex-1 truncate text-slate-800">{f.name}</span>
-                <span className="shrink-0 text-xs text-slate-400">{formatBytes(f.size)}</span>
-                <button
-                  onClick={() => removeFile(f.id)}
-                  aria-label={`Remove ${f.name}`}
-                  className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+              <li key={f.id}>
+                <div
+                  className={`flex items-center gap-2 rounded-lg border bg-white px-3 py-2 text-sm ${
+                    f.status === "error" ? "border-rose-200" : "border-slate-200"
+                  }`}
                 >
-                  <XIcon className="size-3.5" />
-                </button>
+                  <FileIcon className="size-4 shrink-0 text-slate-400" />
+                  <span className="min-w-0 flex-1 truncate text-slate-800">{f.name}</span>
+                  <span className="shrink-0 text-xs text-slate-400">{formatBytes(f.size)}</span>
+                  {f.status === "uploading" && <Spinner className="size-4 shrink-0 text-slate-400" />}
+                  {f.status === "done" && <CheckIcon className="size-4 shrink-0 text-emerald-600" />}
+                  {f.status !== "uploading" && (
+                    <button
+                      onClick={() => removeFile(f.id)}
+                      aria-label={`Remove ${f.name}`}
+                      className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                    >
+                      <XIcon className="size-3.5" />
+                    </button>
+                  )}
+                </div>
+                {f.status === "error" && (
+                  <p className="mt-1 pl-1 text-xs text-rose-600">
+                    {f.received
+                      ? "Received, but automatic review didn't finish. An auditor will still see this file."
+                      : `Didn't go through: ${f.errorMessage}`}
+                  </p>
+                )}
               </li>
             ))}
           </ul>
         )}
 
+        {/* Not persisted anywhere yet -- the upload endpoint has no field
+            for a stakeholder note. Left in as a UI placeholder rather than
+            removed; wire it up if/when the backend gains one. */}
         <textarea
           value={note}
           onChange={(e) => setNote(e.target.value)}
@@ -262,6 +320,8 @@ function UploadForm({
             <>
               <Spinner className="size-4" /> Sending…
             </>
+          ) : anyFailed ? (
+            `Retry ${files.filter((f) => f.status !== "done").length} file${files.filter((f) => f.status !== "done").length > 1 ? "s" : ""}`
           ) : (
             `Submit ${files.length > 0 ? `${files.length} file${files.length > 1 ? "s" : ""}` : ""}`
           )}

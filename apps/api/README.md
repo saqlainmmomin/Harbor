@@ -31,8 +31,8 @@ uploads/                 # LEGACY — pre-Supabase-migration local test files.
 - `POST /evidence-requests/{request_id}/send` — generates (or reuses) a
   magic-link token, emails it via Resend
 - `POST /evidence-requests/{request_id}/upload` — accepts a PDF, uploads it
-  to Supabase Storage, extracts text with `pypdf`, sends it to Gemini
-  (`gemini-flash-latest`) with a compliance-reviewer prompt, applies a
+  to Supabase Storage, extracts text with `pypdf`, sends it to Groq
+  (`openai/gpt-oss-120b`) with a compliance-reviewer prompt, applies a
   code-based placeholder-detection floor on top of the model's own
   completeness judgment, and persists the result (`document_type`,
   `summary`, `suggested_controls`, `missing_sections`,
@@ -77,7 +77,7 @@ missing:
 
 ```bash
 DATABASE_URL=postgresql://<user>@127.0.0.1:5432/ai_audit_copilot
-GEMINI_API_KEY=...
+GROQ_API_KEY=...
 RESEND_API_KEY=...
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...          # service_role secret, not anon
@@ -103,8 +103,9 @@ uvicorn app.main:app --reload --port 8000
 
 ## Known constraints
 
-- **Gemini free tier**: 20 requests/day. Expect real 429s during testing;
-  there's no retry/backoff or paid-tier fallback yet.
+- **Groq free tier**: materially higher than Gemini's 20/day (which is why
+  the review pipeline moved off it), but still a real ceiling — there's no
+  retry/backoff or paid-tier fallback yet.
 - **N+1 queries** in `list_requests_for_engagement` (one query per request
   for files/AI review) — fine at the current scale of a handful of requests
   per engagement, revisit with a real join if that stops being true.

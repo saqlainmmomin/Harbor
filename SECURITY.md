@@ -24,12 +24,14 @@ Access to the bucket is via the Supabase **service-role key**, held only in
 the backend's `apps/api/.env` (gitignored, never sent to the browser). The
 frontend never talks to Supabase directly.
 
-**Today, nothing in the app can read a file back out.** There is no
-download/view endpoint — files are written once at upload time and read
-once, in-memory, immediately after, for text extraction. So in practice the
-only things that ever see file content are: whoever holds the service-role
-key, and Google's Gemini API (see below). Nobody browsing the app UI can
-retrieve the original PDF.
+**Auditors can now view the original file.** `GET /evidence-files/{id}/preview-url`
+generates a short-lived (5-minute) Supabase signed URL and the review panel
+renders it directly — this is new; earlier versions of this document said
+nothing could read a file back out, which was true until this endpoint
+existed. The signed URL is scoped to one file, expires quickly, and is only
+ever handed to an already-authenticated auditor request; it's never stored
+or logged anywhere. Stakeholders (the `/upload/[token]` flow) have no way to
+request one — only the authenticated app does.
 
 Files uploaded before this Supabase migration exist as local test data in
 `apps/api/uploads/` (gitignored, not deployed anywhere) — legacy, not part
@@ -72,8 +74,9 @@ engagement close), that has to be built — it doesn't exist today.
 
 - **Evidence files**: whoever holds the Supabase project's service-role key
   (currently: whoever has `apps/api/.env`) or has dashboard access to the
-  Supabase project itself. No app user — including a signed-in auditor —
-  can retrieve a file's original content through the UI.
+  Supabase project itself, plus any signed-in auditor — the review panel can
+  now request a 5-minute signed URL for a file and view it in place.
+  Stakeholders (the magic-link upload flow) have no way to request one.
 - **Database rows** (requests, reviews, stakeholder contact info): whoever
   can connect to the Postgres instance directly, plus any signed-in auditor
   through the API (there's no per-auditor row-level scoping yet — this is a

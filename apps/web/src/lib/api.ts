@@ -1,11 +1,20 @@
-import type { AiReview, ConfidenceLabel, CompletenessLabel, Engagement, EvidenceRequest, Stakeholder, RequestStatus } from "@/lib/types";
+import type { AiReview, CompanySize, ConfidenceLabel, CompletenessLabel, DecisionType, Engagement, EvidenceRequest, Framework, ReviewDecision, Stakeholder, RequestStatus } from "@/lib/types";
 import type { AuditorContact } from "@/lib/upload-link";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
-// Wire shape actually returned by app/upload_lookup.py today. Notably: no
-// `ai_review` or `decision` — the backend has no `review_decisions` table
-// yet (only `ai_reviews` exists), so this endpoint can't supply them.
+interface WireDecision {
+  id: string;
+  decision: string;
+  note: string | null;
+  decided_by: string;
+  decided_at: string;
+}
+
+// Wire shape actually returned by app/upload_lookup.py today. `ai_review`
+// still isn't inlined here (this endpoint doesn't join ai_reviews) --
+// `decision` now is, since review_decisions is a real table (see
+// submitDecision below).
 interface ApiEvidenceRequestWire {
   id: string;
   engagement_id: string;
@@ -19,6 +28,7 @@ interface ApiEvidenceRequestWire {
   reminder_count: number;
   last_activity_at: string;
   files: Array<{ id: string; filename: string; mime_type: string; size_bytes: number; page_count: number | null; uploaded_at: string; uploaded_by_stakeholder_id: string }>;
+  decision?: WireDecision | null;
 }
 
 interface ApiLookupWire {
@@ -31,20 +41,25 @@ interface ApiLookupWire {
 // Discriminated on `kind` so callers get `request`/`stakeholder`/`auditor` as
 // non-optional once they've checked kind === "active". `request` is the full
 // app-wide EvidenceRequest shape — see mapWireRequest for how the (currently
-// unavailable) ai_review/decision fields are filled in.
+// unavailable) ai_review field is filled in.
 export type UploadLookupResponse =
   | { kind: "active"; request: EvidenceRequest; stakeholder: Stakeholder; auditor: AuditorContact }
   | { kind: "expired"; auditor?: AuditorContact }
   | { kind: "invalid" };
 
+function mapWireDecision(d: WireDecision | null | undefined): ReviewDecision | null {
+  if (!d) return null;
+  return { id: d.id, decision: d.decision as DecisionType, note: d.note ?? "", decided_by: d.decided_by, decided_at: d.decided_at };
+}
+
 function mapWireRequest(wire: ApiEvidenceRequestWire): EvidenceRequest {
   return {
     ...wire,
     status: wire.status as RequestStatus,
-    // Not yet returned by the backend (no review_decisions table, and this
-    // endpoint doesn't join ai_reviews) — explicitly null, not guessed.
+    // Not yet returned by the backend — this endpoint doesn't join
+    // ai_reviews. Real elsewhere (fetchEvidenceReview, fetchEngagementRequests).
     ai_review: null,
-    decision: null,
+    decision: mapWireDecision(wire.decision),
   };
 }
 
@@ -172,12 +187,49 @@ export async function fetchEngagement(engagementId: string): Promise<Engagement 
   return response.json();
 }
 
+// --- POST /engagements — real creation, backs the /engagements/new form.
+export interface CreateEngagementInput {
+  client_name: string;
+  name: string;
+  industry: string;
+  company_size: CompanySize;
+  description?: string;
+  frameworks: Framework[];
+  period_start: string;
+  period_end: string;
+  lead_auditor: string;
+}
+
+export type CreateEngagementResult = { ok: true; engagement: Engagement } | { ok: false; message: string };
+
+export async function createEngagement(input: CreateEngagementInput): Promise<CreateEngagementResult> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/engagements`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  } catch (exc) {
+    return { ok: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+  if (response.ok) return { ok: true, engagement: await response.json() };
+
+  let message = `Could not create engagement (HTTP ${response.status})`;
+  try {
+    const body = await response.json();
+    if (typeof body?.detail === "string") message = body.detail;
+  } catch {
+    // non-JSON error body — keep the generic message
+  }
+  return { ok: false, message };
+}
+
 // --- GET /engagements/{id}/evidence-requests — every real evidence request
 // for the engagement, each with its ai_review inlined. Powers the evidence
 // dashboard; replaces the old mock-data.ts evidenceRequests/stakeholderById.
 interface ApiDashboardRequestWire extends ApiEvidenceRequestWire {
   ai_review: WireAiReview | null;
-  decision: null;
 }
 
 interface ApiDashboardWire {
@@ -200,7 +252,258 @@ export async function fetchEngagementRequests(
     ...r,
     status: r.status as RequestStatus,
     ai_review: mapWireAiReviewInner(r.ai_review, r.files[0]?.id ?? ""),
-    decision: null,
+    decision: mapWireDecision(r.decision),
   }));
   return { requests, stakeholders };
+}
+
+// --- POST /evidence-requests/{id}/upload — the stakeholder's actual file
+// submission. One file per call (that's what the backend accepts); the
+// upload form calls this once per selected file, sequentially.
+export type UploadEvidenceFileResult =
+  | { ok: true }
+  | { ok: false; received: boolean; message: string };
+
+export async function uploadEvidenceFile(requestId: string, file: File): Promise<UploadEvidenceFileResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/upload`, {
+      method: "POST",
+      body: formData,
+    });
+  } catch (exc) {
+    return { ok: false, received: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+
+  if (response.ok) return { ok: true };
+
+  let message = `Upload failed (HTTP ${response.status})`;
+  let received = false;
+  try {
+    const body = await response.json();
+    const detail = body?.detail;
+    const detailMessage = typeof detail === "string" ? detail : detail?.message;
+    if (detailMessage) message = detailMessage;
+    // main.py writes the file to Supabase Storage and inserts the
+    // evidence_files row BEFORE extracting PDF text or calling the review
+    // model (Groq, was Gemini) — so if either of those two specific steps
+    // is what failed, the evidence itself was still received, it just
+    // doesn't have an AI review yet. Any other failure (bad content type,
+    // Supabase Storage itself failing) means nothing was saved.
+    received = detailMessage === "Failed to extract PDF text" || detailMessage === "Groq API request failed";
+  } catch {
+    // non-JSON error body — keep the generic HTTP-status message
+  }
+  return { ok: false, received, message };
+}
+
+// --- GET /engagements/{id}/activity and /evidence-requests/{id}/activity —
+// real activity_log rows (main.py now actually writes to this table on
+// upload + AI-analysis-complete; it didn't before).
+export interface ActivityEvent {
+  id: string;
+  request_id?: string;
+  request_title?: string;
+  actor: string;
+  actor_type: "auditor" | "stakeholder" | "system" | "ai";
+  action: string;
+  detail: string | null;
+  created_at: string;
+}
+
+export async function fetchEngagementActivity(engagementId: string, limit = 20): Promise<ActivityEvent[]> {
+  const response = await fetch(
+    `${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/activity?limit=${limit}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) return [];
+  return response.json();
+}
+
+export async function fetchRequestActivity(requestId: string): Promise<ActivityEvent[]> {
+  const response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/activity`, {
+    cache: "no-store",
+  });
+  if (!response.ok) return [];
+  return response.json();
+}
+
+// --- GET /engagements/{id}/evidence-files — flattened file list for the
+// Evidence page.
+export interface EvidenceFileRow {
+  id: string;
+  filename: string;
+  size_bytes: number;
+  uploaded_at: string;
+  request_id: string;
+  request_title: string;
+  control_ref: string;
+  ai_review: { document_type: string | null; completeness_label: string | null; flag_count: number } | null;
+}
+
+export async function fetchEngagementEvidenceFiles(engagementId: string): Promise<EvidenceFileRow[]> {
+  const response = await fetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/evidence-files`, {
+    cache: "no-store",
+  });
+  if (!response.ok) return [];
+  const wire = await response.json();
+  return wire.files ?? [];
+}
+
+// --- GET /evidence-files/{id}/preview-url — short-lived signed URL so the
+// browser can render the original PDF directly from Supabase Storage.
+export async function fetchFilePreviewUrl(fileId: string): Promise<string | null> {
+  const response = await fetch(`${API_BASE_URL}/evidence-files/${encodeURIComponent(fileId)}/preview-url`, {
+    cache: "no-store",
+  });
+  if (!response.ok) return null;
+  const wire = await response.json();
+  return wire.url ?? null;
+}
+
+// --- GET/POST /engagements/{id}/stakeholders — the engagement's contact
+// list. Stakeholders used to be one untouched global table (fine for a
+// single seeded engagement); this is the real per-engagement list.
+export async function fetchEngagementStakeholders(engagementId: string): Promise<Stakeholder[]> {
+  const response = await fetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/stakeholders`, {
+    cache: "no-store",
+  });
+  if (!response.ok) return [];
+  return response.json();
+}
+
+export interface CreateStakeholderInput {
+  full_name: string;
+  email: string;
+  role_title: string;
+}
+
+export type CreateStakeholderResult = { ok: true; stakeholder: Stakeholder } | { ok: false; message: string };
+
+export async function createStakeholder(
+  engagementId: string,
+  input: CreateStakeholderInput,
+): Promise<CreateStakeholderResult> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/stakeholders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  } catch (exc) {
+    return { ok: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+  if (response.ok) return { ok: true, stakeholder: await response.json() };
+  return { ok: false, message: await errorMessage(response, "Could not add stakeholder") };
+}
+
+// --- POST /evidence-requests — real creation, starts life at "not_sent"
+// until someone calls sendEvidenceRequest below.
+export interface CreateEvidenceRequestInput {
+  engagement_id: string;
+  stakeholder_id: string;
+  control_ref: string;
+  title: string;
+  description: string;
+  due_date: string;
+}
+
+export type CreateEvidenceRequestResult = { ok: true; request: EvidenceRequest } | { ok: false; message: string };
+
+export async function createEvidenceRequest(
+  input: CreateEvidenceRequestInput,
+): Promise<CreateEvidenceRequestResult> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/evidence-requests`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  } catch (exc) {
+    return { ok: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+  if (response.ok) {
+    const wire: ApiEvidenceRequestWire = await response.json();
+    return { ok: true, request: mapWireRequest(wire) };
+  }
+  return { ok: false, message: await errorMessage(response, "Could not create request") };
+}
+
+// --- POST /evidence-requests/{id}/send — generates (or reuses) the upload
+// token, emails the stakeholder via Resend, and flips status from
+// "not_sent" to "awaiting_upload".
+export type SendEvidenceRequestResult = { ok: true; uploadUrl: string } | { ok: false; message: string };
+
+export async function sendEvidenceRequest(requestId: string, toEmail: string): Promise<SendEvidenceRequestResult> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to_email: toEmail }),
+    });
+  } catch (exc) {
+    return { ok: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+  if (response.ok) {
+    const wire = await response.json();
+    return { ok: true, uploadUrl: wire.upload_url };
+  }
+  return { ok: false, message: await errorMessage(response, "Could not send request") };
+}
+
+async function errorMessage(response: Response, fallback: string): Promise<string> {
+  let message = `${fallback} (HTTP ${response.status})`;
+  try {
+    const body = await response.json();
+    const detail = body?.detail;
+    const detailMessage = typeof detail === "string" ? detail : detail?.message;
+    if (detailMessage) message = detailMessage;
+  } catch {
+    // non-JSON error body — keep the generic message
+  }
+  return message;
+}
+
+// --- POST /evidence-requests/{id}/decision — real persistence for the
+// review panel's Approve / Reject / Request more evidence buttons. Used to
+// be local component state only ("prototype — nothing was saved").
+export type SubmitDecisionResult = { ok: true; decision: ReviewDecision } | { ok: false; message: string };
+
+export async function submitDecision(
+  requestId: string,
+  input: { decision: DecisionType; note: string; decided_by: string },
+): Promise<SubmitDecisionResult> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/decision`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  } catch (exc) {
+    return { ok: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+  if (response.ok) {
+    const wire: WireDecision = await response.json();
+    const decision = mapWireDecision(wire);
+    if (!decision) return { ok: false, message: "Malformed response from server" };
+    return { ok: true, decision };
+  }
+  return { ok: false, message: await errorMessage(response, "Could not record decision") };
+}
+
+// --- GET /engagements — every engagement that exists, most recent first.
+// Powers the post-sign-in landing redirect (see app/(auth)/engagements/page.tsx):
+// there's no per-user scoping yet (single-engagement-prototype era), so this
+// is "does at least one engagement exist" rather than "this user's engagements".
+export async function fetchEngagements(): Promise<Engagement[]> {
+  const response = await fetch(`${API_BASE_URL}/engagements`, { cache: "no-store" });
+  if (!response.ok) return [];
+  return response.json();
 }

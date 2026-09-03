@@ -17,11 +17,17 @@ export type DecisionType = "approve" | "reject" | "request_more";
 
 export type FlagSeverity = "blocker" | "warning" | "info";
 
+export type Framework = "SOC2" | "ISO27001";
+export type CompanySize = "startup" | "smb" | "mid_market" | "enterprise";
+
 export interface Engagement {
   id: string;
   name: string;
   client_name: string;
-  framework: "SOC2";
+  industry: string | null;
+  company_size: CompanySize | null;
+  description: string | null;
+  frameworks: Framework[];
   period_start: string; // ISO date
   period_end: string;
   lead_auditor: string;
