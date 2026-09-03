@@ -93,7 +93,7 @@ export function FinalCta() {
     <section className="mx-auto max-w-5xl px-6 py-24 text-center sm:px-10">
       <Reveal>
         <h2 className="text-[32px] leading-tight font-bold tracking-tight text-[#14171C] text-balance">
-          Start your next SOC 2 engagement with evidence already triaged.
+          Start your next ISO 27001, NIST CSF, or PCI-DSS engagement with evidence already triaged.
         </h2>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
           <Link

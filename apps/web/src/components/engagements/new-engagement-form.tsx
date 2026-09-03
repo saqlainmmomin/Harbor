@@ -15,15 +15,20 @@ const COMPANY_SIZES: { value: CompanySize; label: string }[] = [
   { value: "enterprise", label: "Enterprise (5,000+)" },
 ];
 
+// Matches the backend's VALID_FRAMEWORKS exactly (see apps/api/app/main.py)
+// -- SOC2 was dropped, NIST CSF and PCI-DSS are fully supported (not
+// "coming soon"; that used to be inaccurate the moment the backend session
+// shipped their framework definitions).
 const FRAMEWORKS: { key: Framework; label: string; enabled: true }[] = [
-  { key: "SOC2", label: "SOC 2", enabled: true },
   { key: "ISO27001", label: "ISO 27001", enabled: true },
+  { key: "NIST_CSF", label: "NIST CSF", enabled: true },
+  { key: "PCI_DSS", label: "PCI-DSS", enabled: true },
 ];
-const FRAMEWORKS_COMING_SOON = ["GDPR", "HIPAA", "NIST CSF", "PCI-DSS", "India DPDPA"];
+const FRAMEWORKS_COMING_SOON = ["GDPR", "HIPAA", "SOC 2", "India DPDPA"];
 
 export function NewEngagementForm({ leadAuditorName }: { leadAuditorName: string }) {
   const router = useRouter();
-  const [frameworks, setFrameworks] = useState<Framework[]>(["SOC2"]);
+  const [frameworks, setFrameworks] = useState<Framework[]>(["ISO27001"]);
   const [clientName, setClientName] = useState("");
   const [name, setName] = useState("");
   const [industry, setIndustry] = useState("");
@@ -109,7 +114,7 @@ export function NewEngagementForm({ leadAuditorName }: { leadAuditorName: string
                 required
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="SOC 2 Type II, FY26"
+                placeholder="ISO 27001, FY26"
                 className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
               />
             </Field>

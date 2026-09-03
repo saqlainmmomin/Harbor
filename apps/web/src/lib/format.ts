@@ -87,6 +87,7 @@ export const DECISION_LABEL: Record<DecisionType, string> = {
 };
 
 export const FRAMEWORK_LABEL: Record<Framework, string> = {
-  SOC2: "SOC 2",
   ISO27001: "ISO 27001",
+  NIST_CSF: "NIST CSF",
+  PCI_DSS: "PCI-DSS",
 };

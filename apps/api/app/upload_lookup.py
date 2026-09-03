@@ -52,6 +52,13 @@ def _ensure_ai_reviews_schema(cur) -> None:
     )
     cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS compliance_status TEXT")
     cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS follow_up_evidence TEXT")
+    # Mirrors main.py's ensure_ai_reviews_schema -- same reasoning: these are
+    # real columns now, not just fields inside raw_response.text.
+    cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS current_state TEXT")
+    cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS gap_description TEXT")
+    cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS evidence_quote TEXT")
+    cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS risk_level TEXT")
+    cur.execute("ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS control_id_matched TEXT")
 
 
 class AuditorContact(BaseModel):
@@ -330,7 +337,9 @@ def list_requests_for_engagement(engagement_id: str) -> dict:
                     cur.execute(
                         """
                         SELECT id, document_type, summary, suggested_controls, missing_sections,
-                               completeness_label, raw_response, created_at
+                               completeness_label, raw_response, created_at, compliance_status,
+                               current_state, gap_description, evidence_quote, risk_level,
+                               follow_up_evidence, control_id_matched
                         FROM ai_reviews WHERE evidence_file_id = %s
                         ORDER BY created_at DESC LIMIT 1
                         """,
@@ -347,6 +356,13 @@ def list_requests_for_engagement(engagement_id: str) -> dict:
                             "completeness_label": r[5],
                             "raw_response": r[6],
                             "created_at": r[7].isoformat() if r[7] else "",
+                            "compliance_status": r[8],
+                            "current_state": r[9],
+                            "gap_description": r[10],
+                            "evidence_quote": r[11],
+                            "risk_level": r[12],
+                            "follow_up_evidence": r[13],
+                            "control_id_matched": r[14],
                         }
 
                 # Real now -- see get_request_detail's comment on the same

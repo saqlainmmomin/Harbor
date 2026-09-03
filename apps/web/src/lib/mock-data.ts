@@ -11,12 +11,12 @@ export const TODAY = new Date("2026-07-29T09:00:00Z");
 
 export const engagement: Engagement = {
   id: "eng_001",
-  name: "SOC 2 Type II, FY26",
+  name: "ISO 27001, FY26",
   client_name: "Northwind Logistics, Inc.",
   industry: null,
   company_size: null,
   description: null,
-  frameworks: ["SOC2"],
+  frameworks: ["ISO27001"],
   period_start: "2025-07-01",
   period_end: "2026-06-30",
   lead_auditor: "A. Rao",
@@ -366,7 +366,7 @@ export const evidenceRequests: EvidenceRequest[] = [
     engagement_id: "eng_001",
     control_ref: "CC9.2",
     title: "Vendor risk assessments: critical vendors",
-    description: "Most recent risk assessment and SOC 2 report review for each critical vendor.",
+    description: "Most recent risk assessment and third-party audit report review for each critical vendor.",
     stakeholder_id: "s5",
     status: "awaiting_upload",
     due_date: "2026-08-07",

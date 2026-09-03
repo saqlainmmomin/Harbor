@@ -1,7 +1,67 @@
-import type { AiReview, CompanySize, ConfidenceLabel, CompletenessLabel, DecisionType, Engagement, EvidenceRequest, Framework, ReviewDecision, Stakeholder, RequestStatus } from "@/lib/types";
+import type {
+  AiReview,
+  CompanySize,
+  ComplianceStatus,
+  ConfidenceLabel,
+  CompletenessLabel,
+  DecisionType,
+  Engagement,
+  EngagementScope,
+  EvidenceChecklistItem,
+  EvidenceRequest,
+  ExcludedControl,
+  Framework,
+  RfiDraftItem,
+  ReviewDecision,
+  ScopeAnswers,
+  ScopeFramework,
+  ScopeQuestion,
+  Stakeholder,
+  RequestStatus,
+} from "@/lib/types";
 import type { AuditorContact } from "@/lib/upload-link";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+
+// --- Auth boundary --------------------------------------------------------
+// The FastAPI backend now requires a verified Clerk session JWT on every
+// auditor-facing route (see apps/api/app/auth.py) -- this app's scope/RFI/
+// analyze screens are client components that call the backend directly from
+// the browser (not through a Next.js server action), so the token has to be
+// attached here rather than relying on a server-side auth() check alone.
+// Works in both contexts this file runs in:
+//  - Server (Server Components, e.g. the engagement layout): pulls the
+//    session token via @clerk/nextjs/server's auth().
+//  - Client ("use client" components, e.g. scope-workflow.tsx,
+//    review-panel.tsx): reads it off the global `window.Clerk` instance
+//    Clerk's own ClerkProvider exposes -- the documented approach for
+//    attaching auth outside of a React hook context (api.ts's functions
+//    aren't components, so useAuth() isn't usable here).
+// Fails open to "no Authorization header" rather than throwing -- the
+// backend is the actual enforcement point (401s with no/invalid token); a
+// signed-out visitor hitting a public route (e.g. the magic-link upload
+// page) must still work with zero Clerk involvement, matching this app's
+// existing public-upload design.
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  try {
+    if (typeof window === "undefined") {
+      const { auth } = await import("@clerk/nextjs/server");
+      const session = await auth();
+      const token = await session.getToken();
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    const clerk = (window as unknown as { Clerk?: { session?: { getToken: () => Promise<string | null> } } }).Clerk;
+    const token = await clerk?.session?.getToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
+async function authedFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const authHeaders = await getAuthHeaders();
+  return fetch(url, { ...init, headers: { ...authHeaders, ...(init.headers as Record<string, string> | undefined) } });
+}
 
 interface WireDecision {
   id: string;
@@ -99,7 +159,7 @@ interface RequestDetailWire {
 export async function fetchRequestDetail(
   requestId: string,
 ): Promise<{ request: EvidenceRequest; stakeholder: Stakeholder } | null> {
-  const response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}`, {
+  const response = await authedFetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}`, {
     cache: "no-store",
   });
   if (!response.ok) return null;
@@ -124,8 +184,56 @@ interface WireAiReview {
   suggested_controls: WireSuggestedControl[] | null;
   missing_sections: string[] | null;
   completeness_label: CompletenessLabel | null;
-  raw_response: { model_requested?: string; model_resolved?: string } | null;
+  // `text` is Groq's raw JSON response body as a string (see main.py's
+  // ai_reviews.raw_response) -- verified against the real running backend
+  // that this is the ONLY place a persisted control-aware review's
+  // compliance_status/current_state/gap_description/evidence_quote/
+  // risk_level/follow_up_evidence survive a page reload: GET
+  // .../evidence-requests/{id}/review does not expose them as their own
+  // top-level columns (only POST /evidence-files/{id}/analyze's own
+  // response does, per the frozen contract). Parsed as a fallback below.
+  raw_response: { model_requested?: string; model_resolved?: string; text?: string } | null;
   created_at: string;
+  // --- Control-aware analysis columns (added to ai_reviews by the analyze
+  // endpoint). Optional/nullable: older rows and the old document-summary
+  // pipeline never set these; and as of the currently-running backend,
+  // GET .../review never populates them even for a control-aware review --
+  // see raw_response above for where that data actually lives on reload.
+  compliance_status?: ComplianceStatus | null;
+  current_state?: string | null;
+  gap_description?: string | null;
+  evidence_quote?: string | null;
+  risk_level?: string | null;
+  follow_up_evidence?: string | null;
+  control_id_matched?: string | null;
+}
+
+/** Best-effort parse of raw_response.text as the control-aware analyze JSON
+ * shape. Returns null for anything that isn't that shape (old document-
+ * summary reviews' raw_response.text, if ever set, won't have these keys) --
+ * mapWireAiReviewInner below only uses fields from here when the dedicated
+ * columns above are absent, so a wrong guess just leaves those fields empty
+ * rather than fabricating something. */
+function parseRawAnalyzeText(text: string | null | undefined): Partial<WireAiReview> | null {
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && "compliance_status" in parsed) {
+      return parsed as Partial<WireAiReview>;
+    }
+  } catch {
+    // not JSON, or not this shape -- fine, just no fallback data
+  }
+  return null;
+}
+
+function complianceToCompleteness(status: ComplianceStatus | null | undefined): CompletenessLabel {
+  if (status === "compliant") return "complete";
+  if (status === "partially_compliant") return "partial";
+  // non_compliant, not_assessed, or unset -- "insufficient" is the safest
+  // default for the dashboard's existing completeness-driven views (needs-
+  // attention filters, badges) rather than fabricating a middle ground.
+  return "insufficient";
 }
 
 interface EvidenceReviewWire {
@@ -134,7 +242,7 @@ interface EvidenceReviewWire {
 }
 
 export async function fetchEvidenceReview(requestId: string): Promise<EvidenceReviewWire | null> {
-  const response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/review`, {
+  const response = await authedFetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/review`, {
     cache: "no-store",
   });
   // 404 means no file has been submitted yet — same "nothing to show" case
@@ -150,27 +258,64 @@ export async function fetchEvidenceReview(requestId: string): Promise<EvidenceRe
  * review-panel fetch (fetchEvidenceReview, one request at a time) and the
  * dashboard list fetch (fetchEngagementRequests, ai_review inlined per row)
  * below. */
-function mapWireAiReviewInner(r: WireAiReview | null, evidenceFileId: string): AiReview | null {
-  if (!r) return null;
+function mapWireAiReviewInner(rIn: WireAiReview | null, evidenceFileId: string): AiReview | null {
+  if (!rIn) return null;
+  // Fall back to parsing the raw Groq JSON when the dedicated columns are
+  // absent -- see parseRawAnalyzeText's comment. Dedicated columns (if the
+  // backend ever does populate them) always win over the parsed fallback.
+  const fallback = parseRawAnalyzeText(rIn.raw_response?.text);
+  const r: WireAiReview = fallback
+    ? {
+        ...rIn,
+        compliance_status: rIn.compliance_status ?? fallback.compliance_status,
+        current_state: rIn.current_state ?? fallback.current_state,
+        gap_description: rIn.gap_description ?? fallback.gap_description,
+        evidence_quote: rIn.evidence_quote ?? fallback.evidence_quote,
+        risk_level: rIn.risk_level ?? fallback.risk_level,
+        follow_up_evidence: rIn.follow_up_evidence ?? fallback.follow_up_evidence,
+        control_id_matched: rIn.control_id_matched ?? fallback.control_id_matched,
+      }
+    : rIn;
+  const flags: AiReview["flags"] = (r.missing_sections ?? []).map((section, i) => ({
+    id: `missing_${i}`,
+    severity: "warning" as const,
+    title: section,
+    detail: "",
+    location: null,
+  }));
+  // Control-aware analysis doesn't populate missing_sections -- surface its
+  // gap_description as an equivalent flag so dashboard views that filter on
+  // `flags.length` (e.g. potentialExceptions in request-status.ts) still see
+  // it, instead of only working for the old document-summary pipeline.
+  if (flags.length === 0 && r.gap_description && r.compliance_status !== "compliant") {
+    flags.push({
+      id: "gap",
+      severity: r.compliance_status === "non_compliant" ? ("blocker" as const) : ("warning" as const),
+      title: "Gap identified",
+      detail: r.gap_description,
+      location: null,
+    });
+  }
   return {
     id: r.id,
     evidence_file_id: evidenceFileId,
     model: r.raw_response?.model_resolved || r.raw_response?.model_requested || "unknown model",
     reviewed_at: r.created_at,
-    doc_type: r.document_type ?? "Unclassified document",
+    doc_type: r.document_type ?? (r.control_id_matched ? `Evidence for ${r.control_id_matched}` : "Unclassified document"),
     doc_type_alternatives: [],
-    summary: r.summary ?? "",
-    completeness: r.completeness_label ?? "insufficient",
+    summary: r.summary ?? r.current_state ?? "",
+    completeness: r.completeness_label ?? complianceToCompleteness(r.compliance_status),
     suggested_control_refs: (r.suggested_controls ?? []).map((c) => c.control_name),
     suggested_controls: r.suggested_controls ?? undefined,
-    flags: (r.missing_sections ?? []).map((section, i) => ({
-      id: `missing_${i}`,
-      severity: "warning" as const,
-      title: section,
-      detail: "",
-      location: null,
-    })),
-    excerpts: [],
+    flags,
+    excerpts: r.evidence_quote ? [{ location: "Evidence excerpt", text: r.evidence_quote }] : [],
+    compliance_status: r.compliance_status ?? undefined,
+    current_state: r.current_state ?? undefined,
+    gap_description: r.gap_description ?? undefined,
+    evidence_quote: r.evidence_quote ?? undefined,
+    risk_level: r.risk_level ?? undefined,
+    follow_up_evidence: r.follow_up_evidence ?? undefined,
+    control_id_matched: r.control_id_matched ?? undefined,
   };
 }
 
@@ -180,7 +325,7 @@ export function mapWireAiReview(wire: EvidenceReviewWire): AiReview | null {
 
 // --- GET /engagements/{id} — engagement header info for the dashboard.
 export async function fetchEngagement(engagementId: string): Promise<Engagement | null> {
-  const response = await fetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}`, {
+  const response = await authedFetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}`, {
     cache: "no-store",
   });
   if (!response.ok) return null;
@@ -205,7 +350,7 @@ export type CreateEngagementResult = { ok: true; engagement: Engagement } | { ok
 export async function createEngagement(input: CreateEngagementInput): Promise<CreateEngagementResult> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/engagements`, {
+    response = await authedFetch(`${API_BASE_URL}/engagements`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -240,7 +385,7 @@ interface ApiDashboardWire {
 export async function fetchEngagementRequests(
   engagementId: string,
 ): Promise<{ requests: EvidenceRequest[]; stakeholders: Record<string, Stakeholder> }> {
-  const response = await fetch(
+  const response = await authedFetch(
     `${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/evidence-requests`,
     { cache: "no-store" },
   );
@@ -264,13 +409,24 @@ export type UploadEvidenceFileResult =
   | { ok: true }
   | { ok: false; received: boolean; message: string };
 
-export async function uploadEvidenceFile(requestId: string, file: File): Promise<UploadEvidenceFileResult> {
+// `token` is the magic-link credential (see /upload/[token]/page.tsx) for
+// the public stakeholder upload flow; the authenticated auditor re-upload
+// path in review-panel.tsx omits it and relies on authedFetch's bearer
+// token instead. The backend (see main.py's _upload_credential_is_valid)
+// accepts either — Codex review "public upload credential bypass": this
+// endpoint used to accept neither, reachable by request_id alone.
+export async function uploadEvidenceFile(
+  requestId: string,
+  file: File,
+  token?: string,
+): Promise<UploadEvidenceFileResult> {
   const formData = new FormData();
   formData.append("file", file);
+  if (token) formData.append("token", token);
 
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/upload`, {
+    response = await authedFetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/upload`, {
       method: "POST",
       body: formData,
     });
@@ -281,23 +437,22 @@ export async function uploadEvidenceFile(requestId: string, file: File): Promise
   if (response.ok) return { ok: true };
 
   let message = `Upload failed (HTTP ${response.status})`;
-  let received = false;
   try {
     const body = await response.json();
     const detail = body?.detail;
     const detailMessage = typeof detail === "string" ? detail : detail?.message;
     if (detailMessage) message = detailMessage;
-    // main.py writes the file to Supabase Storage and inserts the
-    // evidence_files row BEFORE extracting PDF text or calling the review
-    // model (Groq, was Gemini) — so if either of those two specific steps
-    // is what failed, the evidence itself was still received, it just
-    // doesn't have an AI review yet. Any other failure (bad content type,
-    // Supabase Storage itself failing) means nothing was saved.
-    received = detailMessage === "Failed to extract PDF text" || detailMessage === "Groq API request failed";
   } catch {
     // non-JSON error body — keep the generic HTTP-status message
   }
-  return { ok: false, received, message };
+  // PDF extraction now happens BEFORE the file is stored (see main.py's
+  // upload_evidence_file), and a DB-write failure after a successful
+  // upload deletes the just-stored object — every failure path here now
+  // means nothing was actually saved. `received` used to be true for a
+  // "Failed to extract PDF text" response, which told the stakeholder the
+  // auditor would see a file that, post-fix, was never stored at all
+  // (Codex review finding #11). Always report received: false on failure.
+  return { ok: false, received: false, message };
 }
 
 // --- GET /engagements/{id}/activity and /evidence-requests/{id}/activity —
@@ -315,7 +470,7 @@ export interface ActivityEvent {
 }
 
 export async function fetchEngagementActivity(engagementId: string, limit = 20): Promise<ActivityEvent[]> {
-  const response = await fetch(
+  const response = await authedFetch(
     `${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/activity?limit=${limit}`,
     { cache: "no-store" },
   );
@@ -324,7 +479,7 @@ export async function fetchEngagementActivity(engagementId: string, limit = 20):
 }
 
 export async function fetchRequestActivity(requestId: string): Promise<ActivityEvent[]> {
-  const response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/activity`, {
+  const response = await authedFetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/activity`, {
     cache: "no-store",
   });
   if (!response.ok) return [];
@@ -345,7 +500,7 @@ export interface EvidenceFileRow {
 }
 
 export async function fetchEngagementEvidenceFiles(engagementId: string): Promise<EvidenceFileRow[]> {
-  const response = await fetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/evidence-files`, {
+  const response = await authedFetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/evidence-files`, {
     cache: "no-store",
   });
   if (!response.ok) return [];
@@ -356,7 +511,7 @@ export async function fetchEngagementEvidenceFiles(engagementId: string): Promis
 // --- GET /evidence-files/{id}/preview-url — short-lived signed URL so the
 // browser can render the original PDF directly from Supabase Storage.
 export async function fetchFilePreviewUrl(fileId: string): Promise<string | null> {
-  const response = await fetch(`${API_BASE_URL}/evidence-files/${encodeURIComponent(fileId)}/preview-url`, {
+  const response = await authedFetch(`${API_BASE_URL}/evidence-files/${encodeURIComponent(fileId)}/preview-url`, {
     cache: "no-store",
   });
   if (!response.ok) return null;
@@ -368,7 +523,7 @@ export async function fetchFilePreviewUrl(fileId: string): Promise<string | null
 // list. Stakeholders used to be one untouched global table (fine for a
 // single seeded engagement); this is the real per-engagement list.
 export async function fetchEngagementStakeholders(engagementId: string): Promise<Stakeholder[]> {
-  const response = await fetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/stakeholders`, {
+  const response = await authedFetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/stakeholders`, {
     cache: "no-store",
   });
   if (!response.ok) return [];
@@ -389,7 +544,7 @@ export async function createStakeholder(
 ): Promise<CreateStakeholderResult> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/stakeholders`, {
+    response = await authedFetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/stakeholders`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -419,7 +574,7 @@ export async function createEvidenceRequest(
 ): Promise<CreateEvidenceRequestResult> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/evidence-requests`, {
+    response = await authedFetch(`${API_BASE_URL}/evidence-requests`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -442,7 +597,7 @@ export type SendEvidenceRequestResult = { ok: true; uploadUrl: string } | { ok: 
 export async function sendEvidenceRequest(requestId: string, toEmail: string): Promise<SendEvidenceRequestResult> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/send`, {
+    response = await authedFetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ to_email: toEmail }),
@@ -481,7 +636,7 @@ export async function submitDecision(
 ): Promise<SubmitDecisionResult> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/decision`, {
+    response = await authedFetch(`${API_BASE_URL}/evidence-requests/${encodeURIComponent(requestId)}/decision`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -503,7 +658,258 @@ export async function submitDecision(
 // there's no per-user scoping yet (single-engagement-prototype era), so this
 // is "does at least one engagement exist" rather than "this user's engagements".
 export async function fetchEngagements(): Promise<Engagement[]> {
-  const response = await fetch(`${API_BASE_URL}/engagements`, { cache: "no-store" });
+  const response = await authedFetch(`${API_BASE_URL}/engagements`, { cache: "no-store" });
   if (!response.ok) return [];
   return response.json();
+}
+
+// =====================================================================
+// Scope -> RFI -> control-aware analysis (new)
+// =====================================================================
+
+// --- GET /frameworks/{framework_id}/scope-questions. `framework_id` is the
+// lowercase/slug form the backend registers frameworks under (e.g.
+// "iso27001") -- distinct from the `ScopeFramework` wire value used in the
+// scope submission body ("ISO27001"). Callers pass whichever id the
+// framework picker is keyed on; see ScopeFrameworkMeta in the scope UI.
+interface WireScopeQuestionsResponse {
+  framework_id: string;
+  questions: Array<{
+    id: string;
+    question: string;
+    help_text: string | null;
+    type: string;
+    options: Array<string | { value: string; label: string }> | null;
+  }>;
+}
+
+function normalizeOptions(
+  options: Array<string | { value: string; label: string }> | null | undefined,
+): { value: string; label: string }[] {
+  return (options ?? []).map((o) => (typeof o === "string" ? { value: o, label: o } : o));
+}
+
+// Typed result rather than collapsing every failure to `[]` -- a network
+// error, a 404 for an unregistered framework_id, and "zero questions" used
+// to be indistinguishable to the caller. scope-workflow.tsx needs to tell
+// those apart: it must keep the auditor on the framework/questions step and
+// show an actionable error on failure, never silently proceed with a
+// partial question set (see that component's loadQuestions).
+export type FetchScopeQuestionsResult = { ok: true; questions: ScopeQuestion[] } | { ok: false; message: string };
+
+export async function fetchScopeQuestions(frameworkId: string): Promise<FetchScopeQuestionsResult> {
+  let response: Response;
+  try {
+    response = await authedFetch(`${API_BASE_URL}/frameworks/${encodeURIComponent(frameworkId)}/scope-questions`, {
+      cache: "no-store",
+    });
+  } catch (exc) {
+    return { ok: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+  if (!response.ok) {
+    return { ok: false, message: await errorMessage(response, `Could not load ${frameworkId} scope questions`) };
+  }
+  let wire: WireScopeQuestionsResponse;
+  try {
+    wire = await response.json();
+  } catch {
+    return { ok: false, message: `Malformed response loading ${frameworkId} scope questions` };
+  }
+  return {
+    ok: true,
+    questions: (wire.questions ?? []).map((q) => ({
+      id: q.id,
+      question: q.question,
+      help_text: q.help_text,
+      type: q.type === "multi_select" ? "multi_select" : "single_select",
+      options: normalizeOptions(q.options),
+    })),
+  };
+}
+
+interface WireEngagementScope {
+  applicable_controls: string[];
+  excluded_controls: ExcludedControl[];
+  evidence_checklist: EvidenceChecklistItem[];
+}
+
+function mapWireScope(wire: WireEngagementScope): EngagementScope {
+  return {
+    applicable_controls: wire.applicable_controls ?? [],
+    excluded_controls: wire.excluded_controls ?? [],
+    evidence_checklist: wire.evidence_checklist ?? [],
+  };
+}
+
+export type SubmitScopeResult = { ok: true; scope: EngagementScope } | { ok: false; message: string };
+
+// --- POST /engagements/{id}/scope
+export async function submitEngagementScope(
+  engagementId: string,
+  frameworks: ScopeFramework[],
+  scopeAnswers: ScopeAnswers,
+): Promise<SubmitScopeResult> {
+  let response: Response;
+  try {
+    response = await authedFetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/scope`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frameworks, scope_answers: scopeAnswers }),
+    });
+  } catch (exc) {
+    return { ok: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+  if (response.ok) return { ok: true, scope: mapWireScope(await response.json()) };
+  return { ok: false, message: await errorMessage(response, "Could not compute scope") };
+}
+
+// --- GET /engagements/{id}/scope -- null if not yet run (404) or on error.
+export async function fetchEngagementScope(engagementId: string): Promise<EngagementScope | null> {
+  const response = await authedFetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/scope`, {
+    cache: "no-store",
+  });
+  if (!response.ok) return null;
+  return mapWireScope(await response.json());
+}
+
+export type GenerateRfiDraftResult = { ok: true; items: RfiDraftItem[] } | { ok: false; message: string };
+
+// --- POST /engagements/{id}/generate-rfi -- reads the persisted checklist,
+// returns an unpersisted draft list for the auditor to edit before create.
+// Typed result, not `[]` on failure -- an empty draft list and "the request
+// failed" must render differently (see fetchScopeQuestions above for the
+// same reasoning).
+export async function generateRfiDraft(engagementId: string): Promise<GenerateRfiDraftResult> {
+  let response: Response;
+  try {
+    response = await authedFetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/generate-rfi`, {
+      method: "POST",
+    });
+  } catch (exc) {
+    return { ok: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+  if (!response.ok) {
+    return { ok: false, message: await errorMessage(response, "Could not generate the RFI draft") };
+  }
+  try {
+    const wire: { items: RfiDraftItem[] } = await response.json();
+    return { ok: true, items: wire.items ?? [] };
+  } catch {
+    return { ok: false, message: "Malformed response generating the RFI draft" };
+  }
+}
+
+// --- POST /engagements/{id}/evidence-requests/bulk
+export interface BulkCreateItem {
+  stakeholder_id: string;
+  control_ref: string;
+  title: string;
+  description: string;
+  due_date: string;
+}
+
+export type BulkCreateResult =
+  | { ok: true; created: EvidenceRequest[] }
+  | { ok: false; message: string };
+
+export async function bulkCreateEvidenceRequests(
+  engagementId: string,
+  items: BulkCreateItem[],
+  idempotencyKey?: string,
+): Promise<BulkCreateResult> {
+  let response: Response;
+  try {
+    response = await authedFetch(`${API_BASE_URL}/engagements/${encodeURIComponent(engagementId)}/evidence-requests/bulk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items, idempotency_key: idempotencyKey }),
+    });
+  } catch (exc) {
+    return { ok: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+  if (response.ok) {
+    const wire: { created: ApiEvidenceRequestWire[] } = await response.json();
+    return { ok: true, created: (wire.created ?? []).map(mapWireRequest) };
+  }
+  return { ok: false, message: await errorMessage(response, "Could not create requests") };
+}
+
+// --- POST /evidence-files/{file_id}/analyze -- control-aware analysis,
+// replacing the old automatic-on-upload review.
+//
+// Originally this only reported ok/fail and relied on router.refresh() to
+// re-fetch the persisted review via fetchEvidenceReview (GET .../review),
+// on the assumption that endpoint would also surface compliance_status/
+// current_state/gap_description/evidence_quote/risk_level/follow_up_evidence
+// once the backend extended ai_reviews with those columns. Verified against
+// the real running backend that this assumption was wrong: GET .../review
+// still only returns the old document-summary columns (all null for a
+// control-aware review) plus the raw Groq JSON buried inside
+// raw_response.text -- the new columns aren't in that endpoint's response
+// model, only in POST /analyze's own response (which the frozen contract
+// only specified for POST /analyze, not for GET .../review). So this now
+// parses and returns the POST /analyze body directly -- the review panel
+// renders that immediately rather than depending on a second endpoint that
+// doesn't carry the fields. router.refresh() is still called separately
+// for everything else (status badge, activity log) that DOES come from the
+// server round-trip correctly.
+interface WireAnalyzeResponse {
+  id: string;
+  compliance_status: ComplianceStatus | null;
+  current_state: string | null;
+  gap_description: string | null;
+  evidence_quote: string | null;
+  risk_level: string | null;
+  follow_up_evidence: string | null;
+  control_id_matched: string | null;
+}
+
+export type AnalyzeEvidenceFileResult =
+  | { ok: true; review: AiReview }
+  | { ok: false; message: string };
+
+export async function analyzeEvidenceFile(fileId: string): Promise<AnalyzeEvidenceFileResult> {
+  let response: Response;
+  try {
+    response = await authedFetch(`${API_BASE_URL}/evidence-files/${encodeURIComponent(fileId)}/analyze`, {
+      method: "POST",
+    });
+  } catch (exc) {
+    return { ok: false, message: exc instanceof Error ? exc.message : "Network error" };
+  }
+  if (response.ok) {
+    const wire: WireAnalyzeResponse = await response.json();
+    const flags: AiReview["flags"] = wire.gap_description && wire.gap_description !== "No gap identified."
+      ? [{
+          id: "gap",
+          severity: wire.compliance_status === "non_compliant" ? ("blocker" as const) : ("warning" as const),
+          title: "Gap identified",
+          detail: wire.gap_description,
+          location: null,
+        }]
+      : [];
+    const review: AiReview = {
+      id: wire.id,
+      evidence_file_id: fileId,
+      model: "Groq (control-aware analysis)",
+      reviewed_at: new Date().toISOString(),
+      doc_type: wire.control_id_matched ? `Evidence for ${wire.control_id_matched}` : "Unclassified document",
+      doc_type_alternatives: [],
+      summary: wire.current_state ?? "",
+      completeness: complianceToCompleteness(wire.compliance_status),
+      suggested_control_refs: wire.control_id_matched ? [wire.control_id_matched] : [],
+      suggested_controls: undefined,
+      flags,
+      excerpts: wire.evidence_quote ? [{ location: "Evidence excerpt", text: wire.evidence_quote }] : [],
+      compliance_status: wire.compliance_status ?? undefined,
+      current_state: wire.current_state ?? undefined,
+      gap_description: wire.gap_description ?? undefined,
+      evidence_quote: wire.evidence_quote ?? undefined,
+      risk_level: wire.risk_level ?? undefined,
+      follow_up_evidence: wire.follow_up_evidence ?? undefined,
+      control_id_matched: wire.control_id_matched ?? undefined,
+    };
+    return { ok: true, review };
+  }
+  return { ok: false, message: await errorMessage(response, "Analysis failed") };
 }

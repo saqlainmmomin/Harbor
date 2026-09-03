@@ -2,8 +2,8 @@
 
 // The Mirror-inspired centerpiece (spec sections 5-10): as the visitor
 // scrolls vertically through this one section, the real Audit workflow --
-// Evidence, AI Review, Findings, Controls, Audit Ready -- moves past
-// horizontally. Vertical scroll still drives everything; nothing here
+// Scope, Checklist, RFI, Evidence, AI Review, Findings, Audit Ready -- moves
+// past horizontally. Vertical scroll still drives everything; nothing here
 // hijacks the scroll direction itself, it's a `position: sticky` panel whose
 // internal content translates in response to how far the visitor has
 // scrolled through the (tall) section wrapping it. Collapses to a plain
@@ -23,11 +23,13 @@ type Stage = {
 };
 
 const STAGES: Stage[] = [
-  { key: "evidence", step: "01", label: "Evidence", title: "Evidence arrives", body: "A stakeholder uploads a document against a specific control request." },
-  { key: "ai-review", step: "02", label: "AI Review", title: "AI reads it first", body: "Extraction, classification, and a completeness check run before it reaches your queue." },
-  { key: "findings", step: "03", label: "Findings", title: "Exceptions surface", body: "Anything that doesn't hold up becomes a finding, not a note buried in a document." },
-  { key: "controls", step: "04", label: "Controls", title: "Mapped to controls", body: "Every finding traces back to the control and the evidence it came from." },
-  { key: "ready", step: "05", label: "Audit ready", title: "Ready for review", body: "What reaches you is triaged: source, classification, and exceptions already attached." },
+  { key: "scope", step: "01", label: "Scope", title: "Answer a few scope questions", body: "Pick ISO 27001, NIST CSF, or PCI-DSS and answer a short questionnaire; whatever doesn't apply is excluded, with a reason." },
+  { key: "checklist", step: "02", label: "Checklist", title: "A control-mapped checklist, computed", body: "Every applicable control becomes a required or recommended checklist item, not a blank page." },
+  { key: "rfi", step: "03", label: "RFI", title: "One RFI per control, drafted", body: "The checklist turns into a draft request-for-information list, assigned to stakeholders and sent in bulk." },
+  { key: "evidence", step: "04", label: "Evidence", title: "Evidence arrives", body: "A stakeholder uploads a document against a specific control request." },
+  { key: "ai-review", step: "05", label: "AI Review", title: "AI reads it first", body: "Extraction, classification, and a control-aware completeness check run before it reaches your queue." },
+  { key: "findings", step: "06", label: "Findings", title: "Findings surface, mapped to controls", body: "Anything that doesn't hold up becomes a finding, tied back to the control and the evidence it came from." },
+  { key: "ready", step: "07", label: "Audit ready", title: "Ready for review", body: "What reaches you is triaged: source, classification, and findings already mapped to controls." },
 ];
 
 export function WorkflowStory() {
@@ -137,7 +139,7 @@ function SectionHeading() {
     <div className="text-center">
       <p className="text-[11px] font-semibold tracking-wider text-[#8A8578] uppercase">The workflow</p>
       <h2 className="mx-auto mt-3 max-w-2xl text-[32px] leading-tight font-bold tracking-tight text-[#14171C] text-balance sm:text-[40px]">
-        From evidence to audit-ready, in one path.
+        From scope to audit-ready, in one path.
       </h2>
     </div>
   );
@@ -166,6 +168,52 @@ function StageDetail({ index, active }: { index: number; active: boolean }) {
   switch (index) {
     case 0:
       return (
+        <div className="flex flex-wrap items-center gap-2 text-[13px] font-semibold">
+          <FlowChip label="ISO 27001" tone="neutral" />
+          <FlowChip label="NIST CSF" tone="violet" active={active} delay={0.1} />
+          <FlowChip label="PCI-DSS" tone="neutral" active={active} delay={0.2} />
+        </div>
+      );
+    case 1:
+      return (
+        <ul className="space-y-2">
+          {[
+            { label: "Access control policy", required: true },
+            { label: "Vendor risk assessments", required: false },
+          ].map((item, i) => (
+            <motion.li
+              key={item.label}
+              initial={{ opacity: 0, x: -8 }}
+              animate={active ? { opacity: 1, x: 0 } : { opacity: 0, x: -8 }}
+              transition={{ duration: 0.35, delay: i * 0.1, ease: [0.4, 0, 0.2, 1] }}
+              className="flex items-center justify-between gap-2.5 rounded-lg bg-[#F2EFEA] px-3 py-2 text-[13px] font-medium text-[#14171C]"
+            >
+              <span className="flex items-center gap-2.5">
+                <DocIcon /> {item.label}
+              </span>
+              <span
+                className={`rounded px-1.5 py-0.5 text-[10.5px] font-semibold uppercase ${
+                  item.required ? "bg-[#FBEECD] text-[#8A5A0B]" : "bg-white text-[#8A8578]"
+                }`}
+              >
+                {item.required ? "Required" : "Recommended"}
+              </span>
+            </motion.li>
+          ))}
+        </ul>
+      );
+    case 2:
+      return (
+        <div className="flex items-center gap-2 text-[13px] font-semibold">
+          <FlowChip label="Checklist" tone="neutral" />
+          <Arrow active={active} />
+          <FlowChip label="RFI draft" tone="violet" active={active} delay={0.15} />
+          <Arrow active={active} delay={0.3} />
+          <FlowChip label="Sent" tone="emerald" active={active} delay={0.45} />
+        </div>
+      );
+    case 3:
+      return (
         <ul className="space-y-2">
           {["AWS IAM user export", "Access control policy"].map((label, i) => (
             <motion.li
@@ -180,7 +228,7 @@ function StageDetail({ index, active }: { index: number; active: boolean }) {
           ))}
         </ul>
       );
-    case 1:
+    case 4:
       return (
         <div className="flex items-center gap-2 text-[13px] font-semibold">
           <FlowChip label="Evidence" tone="neutral" />
@@ -190,7 +238,7 @@ function StageDetail({ index, active }: { index: number; active: boolean }) {
           <FlowChip label="Extracted" tone="emerald" active={active} delay={0.45} />
         </div>
       );
-    case 2:
+    case 5:
       return (
         <AnimatePresence mode="wait">
           <motion.p
@@ -204,16 +252,6 @@ function StageDetail({ index, active }: { index: number; active: boolean }) {
           </motion.p>
         </AnimatePresence>
       );
-    case 3:
-      return (
-        <div className="flex items-center gap-2 text-[13px] font-semibold">
-          <FlowChip label="Evidence" tone="neutral" />
-          <Arrow active={active} />
-          <FlowChip label="Control" tone="neutral" active={active} delay={0.1} />
-          <Arrow active={active} delay={0.2} />
-          <FlowChip label="Finding" tone="rose" active={active} delay={0.3} />
-        </div>
-      );
     default:
       return (
         <motion.p
@@ -222,7 +260,7 @@ function StageDetail({ index, active }: { index: number; active: boolean }) {
           transition={{ duration: 0.4 }}
           className="inline-flex items-center gap-2 rounded-lg bg-[#E3EEE8] px-3 py-2 text-[13px] font-semibold text-[#2E4C3B]"
         >
-          <CheckIcon /> Evidence triaged, source attached
+          <CheckIcon /> Evidence triaged, findings mapped to controls
         </motion.p>
       );
   }

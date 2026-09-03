@@ -5,10 +5,17 @@ Real backend, running against a local Postgres database. Not yet deployed
 
 ```
 app/
-  main.py               # FastAPI app; engagement lookup, magic-link send,
-                         # PDF upload → AI review pipeline, startup config check
+  main.py               # FastAPI app; engagement CRUD, magic-link send,
+                         # upload, scope/RFI/bulk-request/analyze/decision
+                         # endpoints, activity log, startup config check
+  auth.py               # Clerk session-JWT verification (JWKS/RS256) +
+                         # auditor-org/allowlist membership check
   upload_lookup.py       # token/id → request/stakeholder/auditor resolution,
                           # and the dashboard's list-all-requests query
+  frameworks/            # ISO 27001 / NIST CSF / PCI-DSS control library +
+                          # per-framework scope-question definitions
+  services/
+    scope_profiler.py    # scope answers → excluded controls + evidence checklist
 seed.py                  # local test data (1 engagement, 1 evidence request)
 tests/                   # smoke tests
 uploads/                 # LEGACY — pre-Supabase-migration local test files.
@@ -18,40 +25,103 @@ uploads/                 # LEGACY — pre-Supabase-migration local test files.
 ## What's actually built
 
 - `GET /health` — healthcheck
+- `GET /engagements` — every engagement in the database, most recent first,
+  for any authenticated auditor (no per-auditor ownership model yet — see
+  "Auth" below). Powers the post-sign-in landing redirect.
+- `POST /engagements` — create an engagement
 - `GET /engagements/{engagement_id}` — engagement lookup
 - `GET /engagements/{engagement_id}/evidence-requests` — every real evidence
-  request for the engagement, each with its files and latest AI review
-  inlined, plus the distinct stakeholders touched. Powers the evidence
-  dashboard.
+  request for the engagement, each with its files, latest AI review, and
+  latest decision inlined, plus the distinct stakeholders touched. Powers
+  the evidence dashboard.
+- `GET /engagements/{engagement_id}/evidence-files` — every evidence file
+  across the engagement, flattened with its request/control context and a
+  *legacy*-shaped AI-review summary (`document_type`/`completeness_label`/
+  `flag_count`) — not the richer control-aware fields `POST
+  /evidence-files/{id}/analyze` returns; these two views haven't been
+  unified yet.
+- `GET /engagements/{engagement_id}/activity` / `GET
+  /evidence-requests/{request_id}/activity` — real `activity_log` rows,
+  most recent first.
+- `GET/POST /engagements/{engagement_id}/stakeholders` — engagement contacts
+- `POST /evidence-requests` / `POST
+  /engagements/{engagement_id}/evidence-requests/bulk` — create one evidence
+  request, or atomically bulk-create a whole RFI draft's worth in one call
+  (idempotent — see `ensure_bulk_idempotency_schema`), validating that every
+  `stakeholder_id` actually belongs to the target engagement before any row
+  is inserted.
+- `GET /frameworks/{framework_id}/scope-questions` — a framework's scope
+  questionnaire (ISO 27001 / NIST CSF / PCI-DSS)
+- `POST /engagements/{engagement_id}/scope` — persists the auditor's scope
+  answers and computes applicable controls, excluded controls (with a
+  reason), and a control-mapped evidence checklist via
+  `app/services/scope_profiler.py`
+- `GET /engagements/{engagement_id}/scope` — the persisted scope result
+- `POST /engagements/{engagement_id}/generate-rfi` — reads the persisted
+  scope checklist and returns a draft RFI item list; review/edit-only, writes
+  nothing
 - `GET /upload/{token}` — resolves a magic-link token to the evidence
   request/stakeholder/auditor, or `{"kind": "invalid"}` if the token doesn't
   match. (Note: doesn't yet distinguish an *expired* token from an *approved*
-  one — the DB doesn't track those states here yet.)
+  one — the DB doesn't track those states here, and tokens never expire.)
 - `GET /evidence-requests/{request_id}` — request detail for the review panel
 - `POST /evidence-requests/{request_id}/send` — generates (or reuses) a
   magic-link token, emails it via Resend
-- `POST /evidence-requests/{request_id}/upload` — accepts a PDF, uploads it
-  to Supabase Storage, extracts text with `pypdf`, sends it to Groq
-  (`openai/gpt-oss-120b`) with a compliance-reviewer prompt, applies a
-  code-based placeholder-detection floor on top of the model's own
-  completeness judgment, and persists the result (`document_type`,
-  `summary`, `suggested_controls`, `missing_sections`,
-  `completeness_label`) to the `ai_reviews` table. Also flips the request's
-  `status` to `pending_review`.
+- `POST /evidence-requests/{request_id}/upload` — accepts a PDF from either
+  the stakeholder (matching the request's own upload token) or an
+  authenticated auditor (re-upload from the review panel) — see
+  `_upload_credential_is_valid`. Uploads it to Supabase Storage and extracts
+  text with `pypdf`. **Does not trigger AI review automatically anymore** —
+  that used to happen inline on every upload; analysis is now an explicit
+  separate call (`POST /evidence-files/{id}/analyze`).
+- `POST /evidence-files/{file_id}/analyze` — control-aware AI review: sends
+  the file's extracted text plus its request's specific `control_ref`
+  (looked up against the ISO 27001/NIST CSF/PCI-DSS control library, with a
+  graceful generic fallback if it doesn't match a known control) to Groq
+  (`openai/gpt-oss-120b`), and persists `compliance_status`, `current_state`,
+  `gap_description`, `evidence_quote`, `risk_level`, and
+  `follow_up_evidence` to `ai_reviews`. Rejects blank extracted text and
+  malformed model output before persisting anything.
 - `GET /evidence-requests/{request_id}/review` — latest uploaded file + its
   AI review for a request
+- `GET /evidence-files/{file_id}/preview-url` — a short-lived (5-minute)
+  Supabase signed URL so an authenticated auditor can view the original PDF
+- `POST /evidence-requests/{request_id}/decision` — persists an
+  Approve/Reject/Request-more decision to `review_decisions`, flips the
+  request's status, and writes an `activity_log` entry, all in one commit.
+  The `decided_by` actor always comes from the verified Clerk token, never
+  from the request body.
+
+## Auth
+
+Every auditor-facing route depends on `app/auth.py`'s
+`get_current_auditor_id` / `get_current_auditor`: it verifies the caller's
+Clerk session JWT against Clerk's own JWKS (RS256, cached, refetched on a
+key-rotation miss) and additionally checks that the token belongs to this
+firm's auditor org (`CLERK_AUDITOR_ORG_ID`, matched against the token's
+`org_id` claim) or allowlist (`CLERK_AUDITOR_USER_IDS`, matched against
+`sub`) — a real, currently-valid Clerk session alone is **not** sufficient,
+since this app's sign-up page is public. Fails closed: an unconfigured
+issuer or auditor org/allowlist returns 503, not "allow everyone"; a real
+JWKS-fetch failure (Clerk outage) also returns 503, distinct from a 401 for
+an actually-invalid token. There is no per-auditor engagement-ownership
+model yet — any authenticated auditor can see any engagement, matching the
+current "single firm, all auditors see all engagements" product shape.
+Resource-level consistency (a `stakeholder_id` belongs to the engagement
+it's attached to, a file/request/engagement chain is internally coherent)
+is enforced separately at each call site, since that's a data-integrity
+property, not an identity one.
+
+The public `/upload/[token]` flow never touches Clerk — its own upload POST
+is gated by the request's own token instead (or a valid Clerk session, for
+an auditor re-upload); see `_upload_credential_is_valid` in `main.py`.
 
 ## Postgres
 
-Local DB `ai_audit_copilot`, 6 tables: `engagements`, `evidence_requests`,
-`stakeholders`, `evidence_files`, `ai_reviews`, `activity_log`. `seed.py`
-populates one engagement (`eng_001`) and one evidence request
-(`req_seed_001`) for local testing.
-
-`review_decisions` does **not** exist yet — auditor approve/reject/request-more
-decisions aren't persisted anywhere on the backend yet. The frontend's
-`EvidenceRequest.decision` field is always `null` when populated from the
-real API as a result.
+Local DB `ai_audit_copilot`, 7 tables: `engagements`, `evidence_requests`,
+`stakeholders`, `evidence_files`, `ai_reviews`, `activity_log`,
+`review_decisions`. `seed.py` populates one engagement (`eng_001`) and one
+evidence request (`req_seed_001`) for local testing.
 
 ## File storage
 
@@ -88,6 +158,20 @@ RESEND_FROM=onboarding@resend.dev
 UPLOAD_BASE_URL=http://localhost:3000/upload
 ```
 
+Auth needs three more vars, deliberately **not** in the startup-required list
+above — see `app/auth.py`'s module docstring for why (a hard exit at import
+time would make `/health` unreachable in any environment that hasn't set up
+Clerk, including local dev/CI). Without them, every auditor-facing request
+fails closed with a 503, so in practice these are required for anything past
+`/health`:
+
+```bash
+CLERK_ISSUER=https://your-app.clerk.accounts.dev   # the Frontend API URL for your Clerk instance
+# at least one of the next two, to define who counts as "an auditor":
+CLERK_AUDITOR_ORG_ID=org_...        # Clerk Organization id for the firm's auditor team
+CLERK_AUDITOR_USER_IDS=user_a,user_b # comma-separated Clerk user-id allowlist, if not using Organizations
+```
+
 Seed the DB (this script doesn't load `.env` itself):
 
 ```bash
@@ -112,10 +196,11 @@ uvicorn app.main:app --reload --port 8000
 
 ## Two rules worth locking in early
 
-1. **Every state change should go through a single activity-log writer.**
-   `activity_log` exists as a table but nothing writes to it yet — this is
-   still a TODO, not implemented.
-2. **`ai_reviews` rows are immutable suggestions.** Once `review_decisions`
-   exists, auditor decisions should live there, never overwriting an AI
-   output — defensibility depends on being able to show what the model said
-   and what the auditor did about it.
+1. **Every state change goes through a single activity-log writer.**
+   `main.py`'s `log_activity` is the only thing that inserts into
+   `activity_log`, called from upload, analyze, and decision — this used to
+   be an empty table with nothing writing to it; it isn't anymore.
+2. **`ai_reviews` rows are immutable suggestions.** Auditor decisions live in
+   `review_decisions`, never overwriting an AI output — defensibility
+   depends on being able to show what the model said and what the auditor
+   did about it.

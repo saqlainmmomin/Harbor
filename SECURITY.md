@@ -54,7 +54,7 @@ engagement close), that has to be built — it doesn't exist today.
 - Frontend ↔ backend: **not encrypted in local dev** (`http://localhost:8000`
   by default). A production deployment must run both behind HTTPS — this
   isn't configured anywhere in the app itself; it depends on how you deploy.
-- Backend ↔ Supabase, Gemini, Resend, Clerk: all HTTPS (the SDKs used for
+- Backend ↔ Supabase, Groq, Resend, Clerk: all HTTPS (the SDKs used for
   each default to TLS endpoints; not something this app configures itself).
 - Backend ↔ Postgres: **not enforced.** `DATABASE_URL` has no `sslmode` set,
   and libpq's default (`prefer`) silently falls back to plaintext if the
@@ -74,30 +74,48 @@ engagement close), that has to be built — it doesn't exist today.
 
 - **Evidence files**: whoever holds the Supabase project's service-role key
   (currently: whoever has `apps/api/.env`) or has dashboard access to the
-  Supabase project itself, plus any signed-in auditor — the review panel can
-  now request a 5-minute signed URL for a file and view it in place.
-  Stakeholders (the magic-link upload flow) have no way to request one.
+  Supabase project itself, plus any auditor authorized per the "evidence
+  dashboard and review panel" entry below — the review panel can request a
+  5-minute signed URL for a file and view it in place. Stakeholders (the
+  magic-link upload flow) have no way to request one.
 - **Database rows** (requests, reviews, stakeholder contact info): whoever
-  can connect to the Postgres instance directly, plus any signed-in auditor
-  through the API (there's no per-auditor row-level scoping yet — this is a
-  single-engagement, single-auditor prototype, not multi-tenant).
+  can connect to the Postgres instance directly, plus any auditor in the
+  firm's Clerk org/allowlist through the API — there's no per-auditor
+  row-level scoping (any auditor in that org/allowlist can see any
+  engagement, not just ones they created). Single-firm, not multi-tenant
+  across firms.
 - **The evidence dashboard and review panel**: any auditor with a valid
-  Clerk session for this app. There's no role distinction (e.g., no
-  "read-only" vs "lead auditor") yet.
+  Clerk session *and* membership in the firm's auditor org/allowlist
+  (`CLERK_AUDITOR_ORG_ID` / `CLERK_AUDITOR_USER_IDS`, checked in
+  `apps/api/app/auth.py`) — a signed-in Clerk user who isn't in that
+  org/allowlist is rejected (403), even though this app's own sign-up page
+  is public. There's still no finer-grained role distinction within that
+  group (e.g., no "read-only" vs "lead auditor"), and no per-auditor
+  engagement ownership — any auditor in the org/allowlist can see any
+  engagement.
 - **The upload page** (`/upload/[token]`): anyone with the magic-link URL —
   by design, this is the stakeholder's only credential. **Tokens never
   expire.** The real backend's token lookup (`upload_lookup.py`) only ever
   returns "invalid" (no match) or "active" (match found) — there is no
   expiry check at all today, despite the frontend having UI for an
   "expired" state. A link is valid forever until someone manually clears
-  the `token` column in the database.
+  the `token` column in the database. The upload page's own file-submit
+  endpoint (`POST /evidence-requests/{request_id}/upload`) independently
+  re-checks this same token (or, for an auditor re-upload from the review
+  panel, a valid Clerk session) server-side before accepting a file — it
+  used to be reachable by `request_id` alone, with no token and no auth
+  required, even though `request_id` values are opaque but not secret (they
+  appear in every auditor-facing response); that gap is closed.
 
 ## Third parties that see this data
 
-- **Google Gemini** receives the extracted text of every uploaded document
-  for AI review. This is the core feature, not incidental — if a document
-  shouldn't leave your infrastructure, don't upload it through this app
-  today.
+- **Groq** receives the extracted text of every document an auditor
+  explicitly submits for analysis (`POST /evidence-files/{id}/analyze`),
+  along with the specific control it's being assessed against. This is the
+  core feature, not incidental — if a document shouldn't leave your
+  infrastructure, don't upload it through this app today. (This used to be
+  Google Gemini; the review pipeline moved to Groq because Gemini's free
+  tier caps at 20 requests/day.)
 - **Resend** receives stakeholder email addresses and the evidence-request
   magic link (not file content).
 - **Supabase** stores the file bytes and (via its Postgres offering, if
@@ -107,7 +125,9 @@ engagement close), that has to be built — it doesn't exist today.
 
 ## What this doesn't cover
 
-No audit logging of who accessed what evidence file and when (`activity_log`
-exists as a table but nothing writes to it — see root README). No
-penetration testing has been done. No formal access review process. This
-document describes what the code actually does today, not a target state.
+`activity_log` records state changes (file uploaded, AI analysis completed,
+decision recorded) with an actor and timestamp, but it is not a read/access
+log — it does not record who merely *viewed* a file or dashboard, only who
+changed something. No penetration testing has been done. No formal access
+review process. This document describes what the code actually does today,
+not a target state.
