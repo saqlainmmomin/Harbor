@@ -42,13 +42,41 @@ def _exclude(excluded: list[dict], all_ids: set[str], ids: set[str], reason: str
 
 _ISO_CLOUD_CONTROLS = {"ISO.A5.23"}
 _ISO_SOFTWARE_DEV_CONTROLS = {f"ISO.A8.{n}" for n in range(25, 35)}
-_ISO_PHYSICAL_CONTROLS = {f"ISO.A7.{n}" for n in range(1, 15)}
+# Product decision (see the handoff's "Constraints and decisions" #3): a
+# fully remote organization has no physical premises, but it still has
+# remote laptops, storage media, and other off-premises assets -- those
+# controls stay applicable. Narrowed from "all of A7.1-A7.14" to only the
+# controls that are genuinely about a physical facility, checked against
+# each control's own title/description/tags in definitions/iso27001.py:
+#   A7.1 Physical security perimeters      -- facility perimeter
+#   A7.2 Physical entry                    -- facility entry points
+#   A7.3 Securing offices, rooms, facilities -- facility rooms
+#   A7.4 Physical security monitoring      -- facility surveillance
+#   A7.5 Physical/environmental threats    -- facility environment
+#   A7.6 Working in secure areas           -- facility secure areas
+#   A7.7 Clear desk and clear screen       -- facility desks/screens
+#   A7.11 Supporting utilities             -- facility power/HVAC
+#   A7.12 Cabling security                 -- facility wiring
+# Deliberately EXCLUDED from this exclusion set (i.e. still applicable when
+# fully remote), because they're about the assets themselves, not the
+# building:
+#   A7.8 Equipment siting and protection   -- covers home-office equipment too
+#   A7.9 Security of assets off-premises   -- tagged "remote-working"; this is
+#        the control that MOST applies to remote laptops, not less
+#   A7.10 Storage media                    -- media life cycle, any location
+#   A7.13 Equipment maintenance            -- remote equipment still needs it
+#   A7.14 Secure disposal or re-use        -- remote equipment still needs it
+_ISO_PREMISES_CONTROLS = {"ISO.A7.1", "ISO.A7.2", "ISO.A7.3", "ISO.A7.4", "ISO.A7.5", "ISO.A7.6", "ISO.A7.7", "ISO.A7.11", "ISO.A7.12"}
 
 
 def _compute_iso27001_exclusions(answers: dict) -> list[dict]:
     all_ids = {c.id for c in ISO27001_DEFINITION.all_controls()}
     excluded: list[dict] = []
 
+    # A missing answer is unresolved, not "no" -- see PCI's handling below
+    # for the same reasoning. main.py's compute_engagement_scope rejects an
+    # incomplete answer set before this ever runs; this is defense in depth,
+    # not the only place it's enforced.
     if answers.get("ISO.SCP.2") == "no":
         _exclude(excluded, all_ids, _ISO_CLOUD_CONTROLS, "Cloud services: not used")
     if answers.get("ISO.SCP.3") == "no":
@@ -58,8 +86,9 @@ def _compute_iso27001_exclusions(answers: dict) -> list[dict]:
         )
     if answers.get("ISO.SCP.4") == "fully_remote":
         _exclude(
-            excluded, all_ids, _ISO_PHYSICAL_CONTROLS,
-            "Physical premises: fully remote, no on-prem information processing facilities",
+            excluded, all_ids, _ISO_PREMISES_CONTROLS,
+            "Physical premises: fully remote, no on-prem information processing facilities "
+            "(off-premises asset, media, maintenance, and disposal controls remain applicable)",
         )
     return excluded
 
@@ -87,6 +116,9 @@ _PCI_ECOMMERCE_CONTROLS = {"PCI.6.6"}
 _PCI_TPSP_CONTROLS = {"PCI.12.8", "PCI.12.9"}
 
 
+_UNANSWERED = object()
+
+
 def _compute_pci_dss_exclusions(answers: dict) -> list[dict]:
     all_ids = {c.id for c in PCI_DSS_DEFINITION.all_controls()}
     excluded: list[dict] = []
@@ -96,14 +128,22 @@ def _compute_pci_dss_exclusions(answers: dict) -> list[dict]:
             excluded, all_ids, _PCI_PHYSICAL_CONTROLS,
             "Cardholder data environment: fully outsourced, no on-premises CDE",
         )
-    channels = answers.get("PCI.SCP.2") or []
-    if isinstance(channels, str):
-        channels = [channels]
-    if "ecommerce" not in channels:
-        _exclude(
-            excluded, all_ids, _PCI_ECOMMERCE_CONTROLS,
-            "Payment channels: no e-commerce / consumer-browser payment pages",
-        )
+    # A missing PCI.SCP.2 key is NOT the same as "answered, zero channels
+    # selected" -- `answers.get(...) or []` used to collapse both to `[]`,
+    # which meant "the auditor never answered this question" silently
+    # excluded PCI.6.6 the same way "the auditor answered and confirmed no
+    # e-commerce" would. Only an explicit answer (even an explicitly empty
+    # selection) can exclude anything here; main.py's compute_engagement_scope
+    # additionally rejects an incomplete answer set before this ever runs.
+    channels = answers.get("PCI.SCP.2", _UNANSWERED)
+    if channels is not _UNANSWERED:
+        if isinstance(channels, str):
+            channels = [channels]
+        if "ecommerce" not in (channels or []):
+            _exclude(
+                excluded, all_ids, _PCI_ECOMMERCE_CONTROLS,
+                "Payment channels: no e-commerce / consumer-browser payment pages",
+            )
     if answers.get("PCI.SCP.3") == "no_tpsp":
         _exclude(
             excluded, all_ids, _PCI_TPSP_CONTROLS,
@@ -207,49 +247,49 @@ def _nist_csf_checklist() -> list[dict]:
             "label": "Asset Inventory (hardware, software, data)",
             "reason": "Assessed against the Identify function's asset management category (ID.AM)",
             "required": True,
-            "maps_to": ["NIST.GV.OC.01"],
+            "maps_to": ["NIST.ID.AM.01"],
         },
         {
             "document_type": "risk_assessment",
             "label": "Cybersecurity Risk Assessment",
             "reason": "Assessed against the Identify function's risk assessment category (ID.RA)",
             "required": True,
-            "maps_to": ["NIST.GV.RM.01"],
+            "maps_to": ["NIST.ID.RA.01"],
         },
         {
             "document_type": "access_control_policy",
             "label": "Identity & Access Management Policy",
             "reason": "Assessed against the Protect function's access control category (PR.AA)",
             "required": True,
-            "maps_to": ["NIST.GV.PO.01"],
+            "maps_to": ["NIST.PR.AA.01"],
         },
         {
             "document_type": "monitoring_procedures",
             "label": "Continuous Monitoring / Detection Procedures",
             "reason": "Assessed against the Detect function (DE.CM, DE.AE)",
             "required": True,
-            "maps_to": ["NIST.GV.OC.01"],
+            "maps_to": ["NIST.DE.CM.01", "NIST.DE.AE.02"],
         },
         {
             "document_type": "incident_response_plan",
             "label": "Incident Response Plan",
             "reason": "Assessed against the Respond function (RS.MA, RS.AN, RS.CO, RS.MI)",
             "required": True,
-            "maps_to": ["NIST.GV.RR.01"],
+            "maps_to": ["NIST.RS.MA.01", "NIST.RS.AN.03", "NIST.RS.CO.02", "NIST.RS.MI.01"],
         },
         {
             "document_type": "recovery_plan",
             "label": "Recovery / Business Continuity Plan",
             "reason": "Assessed against the Recover function (RC.RP, RC.CO)",
             "required": True,
-            "maps_to": ["NIST.GV.RR.01"],
+            "maps_to": ["NIST.RC.RP.01", "NIST.RC.CO.03"],
         },
         {
             "document_type": "supply_chain_risk_docs",
             "label": "Supply Chain Risk Management Documentation",
             "reason": "Assessed against the Govern function's supply chain category (GV.SC)",
             "required": False,
-            "maps_to": ["NIST.GV.RM.01"],
+            "maps_to": ["NIST.GV.SC.01"],
         },
     ]
 
@@ -367,6 +407,28 @@ def compute_scope(framework_id: str, scope_answers: dict) -> dict:
         "excluded_controls": excluded,
         "evidence_checklist": checklist,
     }
+
+
+def validate_scope_answers_complete(scope_answers_by_framework: dict[str, dict]) -> list[str]:
+    """Returns the list of scope_question ids that are missing an answer,
+    across every framework in scope_answers_by_framework (keyed by registry
+    id, e.g. "iso27001") -- empty list means every question has an explicit
+    answer key present. A multi_select question answered with an explicit
+    empty list still counts as answered ("confirmed: none"); only an absent
+    key counts as missing. Called by main.py's compute_engagement_scope
+    before persisting anything -- a checklist computed from an incomplete
+    answer set is misleading (see PCI.SCP.2's exclusion logic above), so
+    incompleteness is rejected at the API boundary rather than silently
+    defaulting."""
+    missing: list[str] = []
+    for framework_id, answers in scope_answers_by_framework.items():
+        fw = FRAMEWORKS.get(framework_id)
+        if fw is None:
+            continue
+        for question in fw.scope_questions:
+            if question.id not in answers:
+                missing.append(question.id)
+    return missing
 
 
 def compute_scope_multi(scope_answers_by_framework: dict[str, dict]) -> dict:

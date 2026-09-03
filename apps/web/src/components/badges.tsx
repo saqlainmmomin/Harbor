@@ -1,4 +1,4 @@
-import type { CompletenessLabel, ConfidenceLabel, FlagSeverity, RequestStatus } from "@/lib/types";
+import type { CompletenessLabel, ComplianceStatus, ConfidenceLabel, FlagSeverity, RequestStatus } from "@/lib/types";
 import { COMPLETENESS_LABEL, STATUS_LABEL } from "@/lib/format";
 
 // Dark-surface-tuned equivalents of the original light-mode badge palette --
@@ -57,6 +57,48 @@ export function CompletenessBadge({
         className={`animate-fade-in rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset whitespace-nowrap ${COMPLETENESS_STYLE[value]}`}
       >
         {COMPLETENESS_LABEL[value]}
+      </span>
+    </span>
+  );
+}
+
+// Same visual pattern as CompletenessBadge (pill + optional bar) but for the
+// control-aware analyze response's compliance_status, which is the verdict
+// that actually matters to an auditor -- met / partial / not met against
+// *this* control, not a generic document-completeness guess.
+const COMPLIANCE_STYLE: Record<ComplianceStatus, string> = {
+  compliant: "bg-[var(--status-emerald-bg)] text-[var(--status-emerald-ink)] ring-[var(--status-emerald-ring)]",
+  partially_compliant: "bg-[var(--status-amber-bg)] text-[var(--status-amber-ink)] ring-[var(--status-amber-ring)]",
+  non_compliant: "bg-[var(--status-rose-bg)] text-[var(--status-rose-ink)] ring-[var(--status-rose-ring)]",
+  not_assessed: "bg-[var(--status-neutral-bg)] text-[var(--status-neutral-ink)] ring-[var(--status-neutral-ring)]",
+};
+
+const COMPLIANCE_BAR: Record<ComplianceStatus, string> = {
+  compliant: "w-full bg-[var(--status-emerald-dot)]",
+  partially_compliant: "w-1/2 bg-[var(--status-amber-dot)]",
+  non_compliant: "w-1/6 bg-[var(--status-rose-dot)]",
+  not_assessed: "w-1/6 bg-[var(--ink-faint)]",
+};
+
+const COMPLIANCE_LABEL: Record<ComplianceStatus, string> = {
+  compliant: "Met",
+  partially_compliant: "Partially met",
+  non_compliant: "Not met",
+  not_assessed: "Not assessed",
+};
+
+export function ComplianceStatusBadge({ value, withBar = false }: { value: ComplianceStatus; withBar?: boolean }) {
+  return (
+    <span className="inline-flex items-center gap-2">
+      {withBar && (
+        <span className="h-1.5 w-10 overflow-hidden rounded-full bg-[var(--surface-raised)]" aria-hidden>
+          <span className={`block h-full rounded-full ${COMPLIANCE_BAR[value]}`} />
+        </span>
+      )}
+      <span
+        className={`animate-fade-in rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset whitespace-nowrap ${COMPLIANCE_STYLE[value]}`}
+      >
+        {COMPLIANCE_LABEL[value]}
       </span>
     </span>
   );

@@ -111,3 +111,241 @@ reasoning for the mix), the full manifest, the file tree under the fixtures fold
 extractable-text spot checks from Verification above. Note explicitly that upload/analyze
 end-to-end verification against the real backend was left for a follow-up pass, since you didn't
 have live credentials.
+
+
+## Results
+
+**Status: complete.** Generated 15 realistic, text-bearing PDF evidence fixtures and a JSON manifest under `/Users/saqlainmomin/ai_audit_copilot/apps/api/tests/fixtures/seed_evidence`. The generator is self-contained at `/Users/saqlainmomin/ai_audit_copilot/apps/api/tests/fixtures/seed_evidence/generate_fixtures.py`, uses the locally available `fpdf2` package, and validates every selected control against the ported framework definitions. No application code, `apps/api/seed.py`, real database, Supabase object, or running API was touched.
+
+### Target controls
+
+The set spans all three registered frameworks and covers policy governance, authentication, authorization, network monitoring, and audit logging. Each control has one compliant, one partially compliant, and one non-compliant/off-target document, yielding five documents per ground-truth category.
+
+| Framework | Control | Real control requirement | Reason for inclusion |
+| --- | --- | --- | --- |
+| ISO27001 | `ISO.A5.1` | Policy lifecycle requirements: defined, management-approved, published, communicated, and acknowledged. | Policy control; the partial fixture isolates acknowledgement. |
+| ISO27001 | `ISO.A8.5` | Secure authentication technologies and procedures tied to information-access restrictions and the access-control policy. | Technical authentication control; the partial fixture isolates weaker service-account authentication. |
+| NIST_CSF | `NIST.PR.AA.05` | Access permissions must be policy-defined, managed, enforced, reviewed, least-privilege, and separated by duty. | Clear multi-part control; the partial fixture isolates emergency-access separation of duties. |
+| NIST_CSF | `NIST.DE.CM.01` | Networks and network services are monitored to find potentially adverse events. | Operational monitoring control with a concrete branch-coverage boundary. |
+| PCI_DSS | `PCI.10.2` | CDE audit logs support detection, alerting, and analysis, including user access and administrator actions. | Logging control with an explicit component-to-SIEM alerting gap. |
+
+### Full manifest
+
+Canonical file: `/Users/saqlainmomin/ai_audit_copilot/apps/api/tests/fixtures/seed_evidence/manifest.json`.
+
+```json
+[
+  {
+    "file": "pdfs/iso_a5_1_compliant_information_security_policy.pdf",
+    "target_control_id": "ISO.A5.1",
+    "framework": "ISO27001",
+    "ground_truth_status": "compliant",
+    "planted_gap": null,
+    "document_title": "Information Security Policy Suite",
+    "document_type": "Management policy",
+    "control_reference": "Annex A.5.1"
+  },
+  {
+    "file": "pdfs/iso_a5_1_partial_acknowledgement_gap.pdf",
+    "target_control_id": "ISO.A5.1",
+    "framework": "ISO27001",
+    "ground_truth_status": "partially_compliant",
+    "planted_gap": "The policy is defined, management-approved, published, and communicated, but the evidence does not show that relevant personnel and interested parties acknowledged the current version.",
+    "document_title": "Information Security Policy",
+    "document_type": "Management policy",
+    "control_reference": "Annex A.5.1"
+  },
+  {
+    "file": "pdfs/iso_a5_1_noncompliant_policy_template.pdf",
+    "target_control_id": "ISO.A5.1",
+    "framework": "ISO27001",
+    "ground_truth_status": "non_compliant",
+    "planted_gap": "Off-target as evidence: this is an unapproved, unfilled template with no organization-specific policy, publication record, communication record, or acknowledgement evidence.",
+    "document_title": "Information Security Policy Template",
+    "document_type": "Unapproved policy template",
+    "control_reference": "Annex A.5.1"
+  },
+  {
+    "file": "pdfs/iso_a8_5_compliant_authentication_standard.pdf",
+    "target_control_id": "ISO.A8.5",
+    "framework": "ISO27001",
+    "ground_truth_status": "compliant",
+    "planted_gap": null,
+    "document_title": "Secure Authentication Standard",
+    "document_type": "Technical standard",
+    "control_reference": "Annex A.8.5"
+  },
+  {
+    "file": "pdfs/iso_a8_5_partial_service_account_gap.pdf",
+    "target_control_id": "ISO.A8.5",
+    "framework": "ISO27001",
+    "ground_truth_status": "partially_compliant",
+    "planted_gap": "Human and privileged authentication is established, but two in-scope application/service accounts still rely on long-lived API keys without secure short-lived authentication or MFA-equivalent protection.",
+    "document_title": "Authentication and Login Procedure",
+    "document_type": "Technical procedure",
+    "control_reference": "Annex A.8.5"
+  },
+  {
+    "file": "pdfs/iso_a8_5_noncompliant_asset_inventory.pdf",
+    "target_control_id": "ISO.A8.5",
+    "framework": "ISO27001",
+    "ground_truth_status": "non_compliant",
+    "planted_gap": "Off-target as evidence: the document inventories technology assets but contains no secure authentication technology or procedure and no evidence about how access restrictions drive authentication strength.",
+    "document_title": "Technology Asset Inventory Extract",
+    "document_type": "Asset inventory report",
+    "control_reference": "Annex A.8.5"
+  },
+  {
+    "file": "pdfs/nist_pr_aa_05_compliant_access_governance_standard.pdf",
+    "target_control_id": "NIST.PR.AA.05",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "compliant",
+    "planted_gap": null,
+    "document_title": "Access Permissions and Authorization Standard",
+    "document_type": "Access-control standard",
+    "control_reference": "PR.AA-05"
+  },
+  {
+    "file": "pdfs/nist_pr_aa_05_partial_emergency_access_gap.pdf",
+    "target_control_id": "NIST.PR.AA.05",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "partially_compliant",
+    "planted_gap": "The standard defines and enforces least-privilege access and periodic reviews, but the emergency-access workflow does not enforce separation of duties: the same person can request and approve an emergency role.",
+    "document_title": "Access Review and Authorization Procedure",
+    "document_type": "Access-control procedure",
+    "control_reference": "PR.AA-05"
+  },
+  {
+    "file": "pdfs/nist_pr_aa_05_noncompliant_facility_badge_procedure.pdf",
+    "target_control_id": "NIST.PR.AA.05",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "non_compliant",
+    "planted_gap": "Off-target as evidence: the procedure addresses physical badges and visitors, not logical access permissions, policy-defined entitlements, least privilege, or separation of duties.",
+    "document_title": "Visitor and Facility Badge Procedure",
+    "document_type": "Physical-security procedure",
+    "control_reference": "PR.AA-05"
+  },
+  {
+    "file": "pdfs/nist_de_cm_01_compliant_network_detection_runbook.pdf",
+    "target_control_id": "NIST.DE.CM.01",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "compliant",
+    "planted_gap": null,
+    "document_title": "Network and Network-Service Monitoring Runbook",
+    "document_type": "Security operations runbook",
+    "control_reference": "DE.CM-01"
+  },
+  {
+    "file": "pdfs/nist_de_cm_01_partial_branch_monitoring_gap.pdf",
+    "target_control_id": "NIST.DE.CM.01",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "partially_compliant",
+    "planted_gap": "Core networks and services are monitored, but the Pune branch network has no connection-event telemetry or detection coverage for potentially adverse events.",
+    "document_title": "Network Monitoring Operations Report",
+    "document_type": "Monitoring operations report",
+    "control_reference": "DE.CM-01"
+  },
+  {
+    "file": "pdfs/nist_de_cm_01_noncompliant_backup_restore_report.pdf",
+    "target_control_id": "NIST.DE.CM.01",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "non_compliant",
+    "planted_gap": "Off-target as evidence: the report demonstrates a backup restoration exercise, not monitoring of networks and network services for potentially adverse events.",
+    "document_title": "Quarterly Backup Restore Test Report",
+    "document_type": "Business continuity test report",
+    "control_reference": "DE.CM-01"
+  },
+  {
+    "file": "pdfs/pci_10_2_compliant_cde_logging_standard.pdf",
+    "target_control_id": "PCI.10.2",
+    "framework": "PCI_DSS",
+    "ground_truth_status": "compliant",
+    "planted_gap": null,
+    "document_title": "Cardholder Data Environment Logging Standard",
+    "document_type": "Technical standard",
+    "control_reference": "PCI-DSS v4.0 Req 10.2"
+  },
+  {
+    "file": "pdfs/pci_10_2_partial_api_alerting_gap.pdf",
+    "target_control_id": "PCI.10.2",
+    "framework": "PCI_DSS",
+    "ground_truth_status": "partially_compliant",
+    "planted_gap": "Audit events exist for most CDE components, but the three new payment-status API nodes are not connected to SIEM correlation and therefore do not support the required alerting for anomalous user or administrator activity.",
+    "document_title": "CDE Audit Logging Operations Review",
+    "document_type": "Logging operations report",
+    "control_reference": "PCI-DSS v4.0 Req 10.2"
+  },
+  {
+    "file": "pdfs/pci_10_2_noncompliant_facility_badge_log.pdf",
+    "target_control_id": "PCI.10.2",
+    "framework": "PCI_DSS",
+    "ground_truth_status": "non_compliant",
+    "planted_gap": "Off-target as evidence: the report covers physical badge activity and provides no audit logs for user access, administrator actions, or security events in the cardholder data environment.",
+    "document_title": "Facility Badge Access Log Review",
+    "document_type": "Physical-security report",
+    "control_reference": "PCI-DSS v4.0 Req 10.2"
+  }
+]
+```
+
+### Final fixture file tree
+
+```text
+apps/api/tests/fixtures/seed_evidence/
+|-- generate_fixtures.py
+|-- manifest.json
+`-- pdfs/
+    |-- iso_a5_1_compliant_information_security_policy.pdf
+    |-- iso_a5_1_partial_acknowledgement_gap.pdf
+    |-- iso_a5_1_noncompliant_policy_template.pdf
+    |-- iso_a8_5_compliant_authentication_standard.pdf
+    |-- iso_a8_5_partial_service_account_gap.pdf
+    |-- iso_a8_5_noncompliant_asset_inventory.pdf
+    |-- nist_pr_aa_05_compliant_access_governance_standard.pdf
+    |-- nist_pr_aa_05_partial_emergency_access_gap.pdf
+    |-- nist_pr_aa_05_noncompliant_facility_badge_procedure.pdf
+    |-- nist_de_cm_01_compliant_network_detection_runbook.pdf
+    |-- nist_de_cm_01_partial_branch_monitoring_gap.pdf
+    |-- nist_de_cm_01_noncompliant_backup_restore_report.pdf
+    |-- pci_10_2_compliant_cde_logging_standard.pdf
+    |-- pci_10_2_partial_api_alerting_gap.pdf
+    |-- pci_10_2_noncompliant_facility_badge_log.pdf
+```
+
+### Verification
+
+Generation command and output:
+
+```text
+PYTHONPATH=/Users/saqlainmomin/ai_audit_copilot/apps/api python3 apps/api/tests/fixtures/seed_evidence/generate_fixtures.py
+Generated 15 PDFs in /Users/saqlainmomin/ai_audit_copilot/apps/api/tests/fixtures/seed_evidence/pdfs
+Manifest: /Users/saqlainmomin/ai_audit_copilot/apps/api/tests/fixtures/seed_evidence/manifest.json
+```
+
+The verification script opened every PDF with `pypdf`. All 15 PDFs have a non-empty text layer, and the manifest has 5 compliant, 5 partially compliant, and 5 non-compliant entries.
+
+| File | Pages | Extracted characters |
+| --- | ---: | ---: |
+| `iso_a5_1_compliant_information_security_policy.pdf` | 1 | 1799 |
+| `iso_a5_1_partial_acknowledgement_gap.pdf` | 1 | 1509 |
+| `iso_a5_1_noncompliant_policy_template.pdf` | 1 | 885 |
+| `iso_a8_5_compliant_authentication_standard.pdf` | 1 | 1746 |
+| `iso_a8_5_partial_service_account_gap.pdf` | 1 | 1510 |
+| `iso_a8_5_noncompliant_asset_inventory.pdf` | 1 | 920 |
+| `nist_pr_aa_05_compliant_access_governance_standard.pdf` | 1 | 1600 |
+| `nist_pr_aa_05_partial_emergency_access_gap.pdf` | 1 | 1597 |
+| `nist_pr_aa_05_noncompliant_facility_badge_procedure.pdf` | 1 | 929 |
+| `nist_de_cm_01_compliant_network_detection_runbook.pdf` | 1 | 1525 |
+| `nist_de_cm_01_partial_branch_monitoring_gap.pdf` | 1 | 1327 |
+| `nist_de_cm_01_noncompliant_backup_restore_report.pdf` | 1 | 941 |
+| `pci_10_2_compliant_cde_logging_standard.pdf` | 1 | 1683 |
+| `pci_10_2_partial_api_alerting_gap.pdf` | 1 | 1448 |
+| `pci_10_2_noncompliant_facility_badge_log.pdf` | 1 | 990 |
+
+Manual extracted-text spot checks:
+
+- `iso_a5_1_compliant_information_security_policy.pdf` reads as a complete policy suite with management approval, controlled publication, personnel and supplier communication, and 486/486 acknowledgements, matching the compliant ground truth.
+- `iso_a8_5_partial_service_account_gap.pdf` covers workforce MFA, FIDO2 administrator access, vault controls, monitoring, and review, while limiting the shortfall to two vendor integrations using long-lived API keys, matching the partial ground truth.
+- `pci_10_2_noncompliant_facility_badge_log.pdf` is a plausible physical-entry review whose scope excludes system-component access, administrator actions, audit-event generation, SIEM ingestion, and security alerting, matching the off-target ground truth.
+
+Upload/analyze end-to-end verification against the real backend was deliberately left for a follow-up pass. This session had no live Groq/Supabase credentials, and the handoff separates fixture generation from uploading or touching real application data.

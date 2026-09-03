@@ -30,3 +30,8 @@ sqlalchemy==2.0.4
 requests==2.34.2
 httpx==0.28.0
 pytest==8.4.0
+
+# app/auth.py -- verifies the Clerk session JWT the frontend attaches to
+# every auditor-facing request (RS256 signature check against Clerk's JWKS).
+PyJWT==2.13.0
+cryptography==50.0.1

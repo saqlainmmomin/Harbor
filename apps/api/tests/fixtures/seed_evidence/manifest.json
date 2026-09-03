@@ -1,0 +1,152 @@
+[
+  {
+    "file": "pdfs/iso_a5_1_compliant_information_security_policy.pdf",
+    "target_control_id": "ISO.A5.1",
+    "framework": "ISO27001",
+    "ground_truth_status": "compliant",
+    "planted_gap": null,
+    "document_title": "Information Security Policy Suite",
+    "document_type": "Management policy",
+    "control_reference": "Annex A.5.1"
+  },
+  {
+    "file": "pdfs/iso_a5_1_partial_acknowledgement_gap.pdf",
+    "target_control_id": "ISO.A5.1",
+    "framework": "ISO27001",
+    "ground_truth_status": "partially_compliant",
+    "planted_gap": "The policy is defined, management-approved, published, and communicated, but the evidence does not show that relevant personnel and interested parties acknowledged the current version.",
+    "document_title": "Information Security Policy",
+    "document_type": "Management policy",
+    "control_reference": "Annex A.5.1"
+  },
+  {
+    "file": "pdfs/iso_a5_1_noncompliant_policy_template.pdf",
+    "target_control_id": "ISO.A5.1",
+    "framework": "ISO27001",
+    "ground_truth_status": "non_compliant",
+    "planted_gap": "Off-target as evidence: this is an unapproved, unfilled template with no organization-specific policy, publication record, communication record, or acknowledgement evidence.",
+    "document_title": "Information Security Policy Template",
+    "document_type": "Unapproved policy template",
+    "control_reference": "Annex A.5.1"
+  },
+  {
+    "file": "pdfs/iso_a8_5_compliant_authentication_standard.pdf",
+    "target_control_id": "ISO.A8.5",
+    "framework": "ISO27001",
+    "ground_truth_status": "compliant",
+    "planted_gap": null,
+    "document_title": "Secure Authentication Standard",
+    "document_type": "Technical standard",
+    "control_reference": "Annex A.8.5"
+  },
+  {
+    "file": "pdfs/iso_a8_5_partial_service_account_gap.pdf",
+    "target_control_id": "ISO.A8.5",
+    "framework": "ISO27001",
+    "ground_truth_status": "partially_compliant",
+    "planted_gap": "Human and privileged authentication is established, but two in-scope application/service accounts still rely on long-lived API keys without secure short-lived authentication or MFA-equivalent protection.",
+    "document_title": "Authentication and Login Procedure",
+    "document_type": "Technical procedure",
+    "control_reference": "Annex A.8.5"
+  },
+  {
+    "file": "pdfs/iso_a8_5_noncompliant_asset_inventory.pdf",
+    "target_control_id": "ISO.A8.5",
+    "framework": "ISO27001",
+    "ground_truth_status": "non_compliant",
+    "planted_gap": "Off-target as evidence: the document inventories technology assets but contains no secure authentication technology or procedure and no evidence about how access restrictions drive authentication strength.",
+    "document_title": "Technology Asset Inventory Extract",
+    "document_type": "Asset inventory report",
+    "control_reference": "Annex A.8.5"
+  },
+  {
+    "file": "pdfs/nist_pr_aa_05_compliant_access_governance_standard.pdf",
+    "target_control_id": "NIST.PR.AA.05",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "compliant",
+    "planted_gap": null,
+    "document_title": "Access Permissions and Authorization Standard",
+    "document_type": "Access-control standard",
+    "control_reference": "PR.AA-05"
+  },
+  {
+    "file": "pdfs/nist_pr_aa_05_partial_emergency_access_gap.pdf",
+    "target_control_id": "NIST.PR.AA.05",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "partially_compliant",
+    "planted_gap": "The standard defines and enforces least-privilege access and periodic reviews, but the emergency-access workflow does not enforce separation of duties: the same person can request and approve an emergency role.",
+    "document_title": "Access Review and Authorization Procedure",
+    "document_type": "Access-control procedure",
+    "control_reference": "PR.AA-05"
+  },
+  {
+    "file": "pdfs/nist_pr_aa_05_noncompliant_facility_badge_procedure.pdf",
+    "target_control_id": "NIST.PR.AA.05",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "non_compliant",
+    "planted_gap": "Off-target as evidence: the procedure addresses physical badges and visitors, not logical access permissions, policy-defined entitlements, least privilege, or separation of duties.",
+    "document_title": "Visitor and Facility Badge Procedure",
+    "document_type": "Physical-security procedure",
+    "control_reference": "PR.AA-05"
+  },
+  {
+    "file": "pdfs/nist_de_cm_01_compliant_network_detection_runbook.pdf",
+    "target_control_id": "NIST.DE.CM.01",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "compliant",
+    "planted_gap": null,
+    "document_title": "Network and Network-Service Monitoring Runbook",
+    "document_type": "Security operations runbook",
+    "control_reference": "DE.CM-01"
+  },
+  {
+    "file": "pdfs/nist_de_cm_01_partial_branch_monitoring_gap.pdf",
+    "target_control_id": "NIST.DE.CM.01",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "partially_compliant",
+    "planted_gap": "Core networks and services are monitored, but the Pune branch network has no connection-event telemetry or detection coverage for potentially adverse events.",
+    "document_title": "Network Monitoring Operations Report",
+    "document_type": "Monitoring operations report",
+    "control_reference": "DE.CM-01"
+  },
+  {
+    "file": "pdfs/nist_de_cm_01_noncompliant_backup_restore_report.pdf",
+    "target_control_id": "NIST.DE.CM.01",
+    "framework": "NIST_CSF",
+    "ground_truth_status": "non_compliant",
+    "planted_gap": "Off-target as evidence: the report demonstrates a backup restoration exercise, not monitoring of networks and network services for potentially adverse events.",
+    "document_title": "Quarterly Backup Restore Test Report",
+    "document_type": "Business continuity test report",
+    "control_reference": "DE.CM-01"
+  },
+  {
+    "file": "pdfs/pci_10_2_compliant_cde_logging_standard.pdf",
+    "target_control_id": "PCI.10.2",
+    "framework": "PCI_DSS",
+    "ground_truth_status": "compliant",
+    "planted_gap": null,
+    "document_title": "Cardholder Data Environment Logging Standard",
+    "document_type": "Technical standard",
+    "control_reference": "PCI-DSS v4.0 Req 10.2"
+  },
+  {
+    "file": "pdfs/pci_10_2_partial_api_alerting_gap.pdf",
+    "target_control_id": "PCI.10.2",
+    "framework": "PCI_DSS",
+    "ground_truth_status": "partially_compliant",
+    "planted_gap": "Audit events exist for most CDE components, but the three new payment-status API nodes are not connected to SIEM correlation and therefore do not support the required alerting for anomalous user or administrator activity.",
+    "document_title": "CDE Audit Logging Operations Review",
+    "document_type": "Logging operations report",
+    "control_reference": "PCI-DSS v4.0 Req 10.2"
+  },
+  {
+    "file": "pdfs/pci_10_2_noncompliant_facility_badge_log.pdf",
+    "target_control_id": "PCI.10.2",
+    "framework": "PCI_DSS",
+    "ground_truth_status": "non_compliant",
+    "planted_gap": "Off-target as evidence: the report covers physical badge activity and provides no audit logs for user access, administrator actions, or security events in the cardholder data environment.",
+    "document_title": "Facility Badge Access Log Review",
+    "document_type": "Physical-security report",
+    "control_reference": "PCI-DSS v4.0 Req 10.2"
+  }
+]

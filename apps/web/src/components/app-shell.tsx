@@ -17,6 +17,7 @@ function navFor(engagementId: string): { primary: NavItem[]; secondary: NavItem[
       { label: "Overview", href: base },
       { label: "Evidence", href: `${base}/evidence` },
       { label: "Requests", href: `${base}/requests` },
+      { label: "Scope & RFI", href: `${base}/scope` },
       { label: "Controls", href: `${base}/controls` },
       { label: "Findings", href: `${base}/findings` },
     ],

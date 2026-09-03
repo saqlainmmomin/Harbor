@@ -2,11 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CompletenessBadge, confidenceStyle, severityStyle } from "@/components/badges";
+import { CompletenessBadge, ComplianceStatusBadge, confidenceStyle, severityStyle } from "@/components/badges";
 import { DECISION_LABEL, formatBytes, formatDateTime, relativeTime } from "@/lib/format";
-import { fetchFilePreviewUrl, submitDecision, uploadEvidenceFile } from "@/lib/api";
+import { analyzeEvidenceFile, fetchFilePreviewUrl, submitDecision, uploadEvidenceFile } from "@/lib/api";
 import type {
   ActivityEntry,
+  AiReview,
   DecisionType,
   EvidenceRequest,
   Stakeholder,
@@ -58,10 +59,53 @@ export function ReviewPanel({
   const [previewState, setPreviewState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [uploadState, setUploadState] = useState<"idle" | "uploading" | "error">("idle");
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [analysisState, setAnalysisState] = useState<"idle" | "analyzing" | "done" | "error">("idle");
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  // Holds the just-analyzed result straight from POST /analyze's own
+  // response. GET /evidence-requests/{id}/review (what router.refresh()
+  // re-fetches server-side) doesn't surface compliance_status/current_state/
+  // gap_description/evidence_quote/follow_up_evidence -- verified against
+  // the real backend, those columns are only in the POST /analyze response,
+  // not in that GET endpoint's response model. So the freshly analyzed
+  // result is kept here and preferred for its file until a page navigation
+  // clears it, rather than being lost the moment router.refresh() re-renders
+  // with the GET endpoint's incomplete data.
+  const [freshReview, setFreshReview] = useState<{ fileId: string; review: AiReview } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
 
   const activeFile = request.files.find((f) => f.id === activeFileId) ?? null;
+  // The review the backend has on file isn't automatic any more (see
+  // Analyze below) and is scoped to whichever file it was run against --
+  // don't show a stale review for a different uploaded file. A fresh
+  // in-memory result (see freshReview above) takes priority over the
+  // server-fetched one for the same file, since it's guaranteed complete.
+  const activeReview =
+    freshReview && activeFile && freshReview.fileId === activeFile.id
+      ? freshReview.review
+      : review && activeFile && review.evidence_file_id === activeFile.id
+        ? review
+        : null;
+
+  // Replaces the old "AI analysis fires automatically on upload" flow --
+  // POST /evidence-files/{id}/analyze, then router.refresh() so status/
+  // activity update server-side (same pattern as handleFileSelected/
+  // handleDecision below); the parsed result itself is rendered immediately
+  // from the response body (see freshReview above), not re-fetched.
+  async function handleAnalyze() {
+    if (!activeFile) return;
+    setAnalysisState("analyzing");
+    setAnalysisError(null);
+    const result = await analyzeEvidenceFile(activeFile.id);
+    if (result.ok) {
+      setAnalysisState("done");
+      setFreshReview({ fileId: activeFile.id, review: result.review });
+      router.refresh();
+      return;
+    }
+    setAnalysisState("error");
+    setAnalysisError(result.message);
+  }
 
   // Real upload, same endpoint the public stakeholder link uses -- lets the
   // signed-in auditor attach evidence directly to a request instead of only
@@ -243,7 +287,7 @@ export function ReviewPanel({
         </section>
 
         {/* AI analysis */}
-        {review ? (
+        {activeReview ? (
           <section className="rounded-[14px] border border-[var(--border)] bg-[var(--surface)]">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] px-4 py-2.5">
               <div className="flex items-center gap-2">
@@ -252,202 +296,293 @@ export function ReviewPanel({
                   Suggestion only
                 </span>
               </div>
-              <span className="text-xs text-[var(--ink-muted)]">
-                {review.model} · {relativeTime(review.reviewed_at)}
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-[var(--ink-muted)]">
+                  {review?.model} · {relativeTime(activeReview.reviewed_at)}
+                </span>
+                <button
+                  onClick={handleAnalyze}
+                  disabled={analysisState === "analyzing"}
+                  title="Re-running replaces the result above."
+                  className="rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-raised)] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {analysisState === "analyzing" ? "Analyzing…" : "Re-analyze"}
+                </button>
+              </div>
             </div>
 
             <div className="space-y-5 p-4">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Field label="Assessed completeness">
-                  <CompletenessBadge value={review.completeness} withBar />
-                </Field>
-                <Field label="Classified document type">
-                  <p className="text-sm font-medium text-[var(--ink)]">{review.doc_type}</p>
-                  {review.doc_type_alternatives.length > 0 && (
-                    <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-                      Also considered: {review.doc_type_alternatives.join(", ")}
-                    </p>
-                  )}
-                </Field>
-              </div>
-
-              <Field label="Summary">
-                <p className="text-sm leading-relaxed text-[var(--ink-secondary)]">{review.summary}</p>
-              </Field>
-
-              <Field label="Suggested control mapping">
-                {review.suggested_controls && review.suggested_controls.length > 0 ? (
-                  // Real API path — each suggestion carries a confidence
-                  // label and rationale the model gave for it, so this
-                  // renders one row per control instead of a bare chip.
-                  <div className="space-y-2">
-                    {review.suggested_controls.map((c, i) => {
-                      const on = mappedControls.includes(c.control_name);
-                      const cs = confidenceStyle(c.confidence_label);
-                      return (
-                        <div
-                          key={`${c.control_name}-${i}`}
-                          className="flex flex-wrap items-start gap-2 rounded-md border border-[var(--border)] p-2.5"
-                        >
-                          <button
-                            onClick={() =>
-                              setMappedControls((prev) =>
-                                on
-                                  ? prev.filter((x) => x !== c.control_name)
-                                  : [...prev, c.control_name],
-                              )
-                            }
-                            className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset transition-colors ${
-                              on
-                                ? "bg-[var(--accent)] text-[var(--accent-ink)] ring-[var(--accent)]"
-                                : "bg-[var(--surface)] text-[var(--ink-secondary)] ring-[var(--border-strong)] hover:bg-[var(--surface-raised)]"
-                            }`}
-                          >
-                            {on ? "✓ " : "+ "}
-                            {c.control_name}
-                          </button>
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset whitespace-nowrap ${cs.chip}`}
-                          >
-                            {cs.label}
-                          </span>
-                          <span className="w-full text-xs text-[var(--ink-muted)] sm:w-auto sm:flex-1">
-                            {c.rationale}
-                          </span>
-                        </div>
-                      );
-                    })}
-                    <p className="text-xs text-[var(--ink-muted)]">
-                      {mappedControls.length === 0
-                        ? "No controls mapped"
-                        : `Mapped to ${mappedControls.join(", ")}`}
-                    </p>
-                  </div>
-                ) : (
-                  // Mock-data path — unchanged from the original mockup.
-                  <div className="flex flex-wrap items-center gap-2">
-                    {review.suggested_control_refs.map((ref) => {
-                      const on = mappedControls.includes(ref);
-                      return (
-                        <button
-                          key={ref}
-                          onClick={() =>
-                            setMappedControls((prev) =>
-                              on ? prev.filter((c) => c !== ref) : [...prev, ref],
-                            )
-                          }
-                          className={`rounded-full px-2.5 py-1 font-mono text-xs font-medium ring-1 ring-inset transition-colors ${
-                            on
-                              ? "bg-[var(--accent)] text-[var(--accent-ink)] ring-[var(--accent)]"
-                              : "bg-[var(--surface)] text-[var(--ink-muted)] ring-[var(--border-strong)] hover:bg-[var(--surface-raised)]"
-                          }`}
-                        >
-                          {on ? "✓ " : "+ "}
-                          {ref}
-                        </button>
-                      );
-                    })}
-                    <span className="text-xs text-[var(--ink-muted)]">
-                      {mappedControls.length === 0
-                        ? "No controls mapped"
-                        : `Mapped to ${mappedControls.join(", ")}`}
-                    </span>
-                  </div>
-                )}
-              </Field>
-
-              {review.flags.length > 0 && (
-                <Field label={`Flags (${review.flags.length})`}>
-                  <p className="mb-2 text-xs text-[var(--ink-muted)]">
-                    Tick the items you want the stakeholder to address, then draft the follow-up.
-                  </p>
-                  <ul className="space-y-2">
-                    {review.flags.map((f) => {
-                      const s = severityStyle(f.severity);
-                      const checked = selectedFlags.includes(f.id);
-                      return (
-                        <li key={f.id}>
-                          <label
-                            className={`flex cursor-pointer gap-3 rounded-md border p-3 transition-colors ${s.chip} ${
-                              checked ? "ring-1 ring-[var(--border-strong)]" : ""
-                            }`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggleFlag(f.id)}
-                              className="mt-0.5 size-4 shrink-0 accent-[var(--accent)]"
-                            />
-                            <span className="min-w-0">
-                              <span className="flex flex-wrap items-center gap-2">
-                                <span className={`size-1.5 rounded-full ${s.dot}`} aria-hidden />
-                                <span className="text-sm font-medium text-[var(--ink)]">{f.title}</span>
-                                <span className="text-[11px] font-medium tracking-wide text-[var(--ink-faint)] uppercase">
-                                  {s.label}
-                                </span>
-                              </span>
-                              <span className="mt-1 block text-sm text-[var(--ink-secondary)]">{f.detail}</span>
-                              {f.location && (
-                                <span className="mt-1 block font-mono text-[11px] text-[var(--ink-faint)]">
-                                  {f.location}
-                                </span>
-                              )}
-                            </span>
-                          </label>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                  <button
-                    onClick={draftFromFlags}
-                    disabled={selectedFlags.length === 0}
-                    className="mt-3 rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-raised)] disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    Draft follow-up from {selectedFlags.length || "selected"} flag
-                    {selectedFlags.length === 1 ? "" : "s"}
-                  </button>
-                </Field>
+              {analysisState === "error" && analysisError && (
+                <p className="text-sm font-medium text-[var(--status-rose-ink)]">{analysisError}</p>
               )}
 
-              {review.excerpts.length > 0 && (
-                <Field label="Source excerpts">
-                  <p className="mb-2 text-xs text-[var(--ink-muted)]">
-                    What the model actually read. Every conclusion above should trace back to one of these.
-                  </p>
-                  <ul className="space-y-2">
-                    {review.excerpts.map((e) => (
-                      <li
-                        key={e.location}
-                        className="rounded-md border border-[var(--border)] bg-[var(--surface-raised)] p-3"
+              {activeReview.compliance_status ? (
+                // Control-aware analysis (POST /evidence-files/{id}/analyze) --
+                // the field set this section renders now: a met/partial/not-met
+                // verdict against the *specific* control this file was
+                // requested for, not a generic document summary.
+                <>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label="Control status">
+                      <ComplianceStatusBadge value={activeReview.compliance_status} withBar />
+                      {activeReview.control_id_matched && (
+                        <p className="mt-1 font-mono text-xs text-[var(--ink-faint)]">
+                          Matched to {activeReview.control_id_matched}
+                        </p>
+                      )}
+                    </Field>
+                    {activeReview.risk_level && (
+                      <Field label="Risk level">
+                        <p className="text-sm font-medium text-[var(--ink)] capitalize">{activeReview.risk_level}</p>
+                      </Field>
+                    )}
+                  </div>
+
+                  {activeReview.current_state && (
+                    <Field label="Current state">
+                      <p className="text-sm leading-relaxed text-[var(--ink-secondary)]">{activeReview.current_state}</p>
+                    </Field>
+                  )}
+
+                  {activeReview.gap_description && (
+                    <Field label="Gap">
+                      <p className="text-sm leading-relaxed text-[var(--ink-secondary)]">{activeReview.gap_description}</p>
+                    </Field>
+                  )}
+
+                  {activeReview.evidence_quote && (
+                    <Field label="Source excerpt">
+                      <p className="mb-2 text-xs text-[var(--ink-muted)]">
+                        What the model actually read. The verdict above should trace back to this.
+                      </p>
+                      <div className="rounded-md border border-[var(--border)] bg-[var(--surface-raised)] p-3">
+                        <p className="text-sm text-[var(--ink-secondary)] italic">&ldquo;{activeReview.evidence_quote}&rdquo;</p>
+                      </div>
+                    </Field>
+                  )}
+
+                  {activeReview.follow_up_evidence && (
+                    // The field the auditor most needs -- what to actually go
+                    // collect next -- so it gets its own visually distinct
+                    // block instead of being buried among the read-only fields.
+                    <Field label="What to collect next">
+                      <div className="rounded-md border border-[var(--status-amber-ring)] bg-[var(--status-amber-bg)] p-3">
+                        <p className="text-sm font-medium text-[var(--status-amber-ink)]">{activeReview.follow_up_evidence}</p>
+                      </div>
+                    </Field>
+                  )}
+                </>
+              ) : (
+                // Legacy fallback -- a review persisted before this endpoint
+                // existed (or from mock-data). Same rendering as before.
+                <>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label="Assessed completeness">
+                      <CompletenessBadge value={activeReview.completeness} withBar />
+                    </Field>
+                    <Field label="Classified document type">
+                      <p className="text-sm font-medium text-[var(--ink)]">{activeReview.doc_type}</p>
+                      {activeReview.doc_type_alternatives.length > 0 && (
+                        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
+                          Also considered: {activeReview.doc_type_alternatives.join(", ")}
+                        </p>
+                      )}
+                    </Field>
+                  </div>
+
+                  <Field label="Summary">
+                    <p className="text-sm leading-relaxed text-[var(--ink-secondary)]">{activeReview.summary}</p>
+                  </Field>
+
+                  <Field label="Suggested control mapping">
+                    {activeReview.suggested_controls && activeReview.suggested_controls.length > 0 ? (
+                      <div className="space-y-2">
+                        {activeReview.suggested_controls.map((c, i) => {
+                          const on = mappedControls.includes(c.control_name);
+                          const cs = confidenceStyle(c.confidence_label);
+                          return (
+                            <div
+                              key={`${c.control_name}-${i}`}
+                              className="flex flex-wrap items-start gap-2 rounded-md border border-[var(--border)] p-2.5"
+                            >
+                              <button
+                                onClick={() =>
+                                  setMappedControls((prev) =>
+                                    on
+                                      ? prev.filter((x) => x !== c.control_name)
+                                      : [...prev, c.control_name],
+                                  )
+                                }
+                                className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset transition-colors ${
+                                  on
+                                    ? "bg-[var(--accent)] text-[var(--accent-ink)] ring-[var(--accent)]"
+                                    : "bg-[var(--surface)] text-[var(--ink-secondary)] ring-[var(--border-strong)] hover:bg-[var(--surface-raised)]"
+                                }`}
+                              >
+                                {on ? "✓ " : "+ "}
+                                {c.control_name}
+                              </button>
+                              <span
+                                className={`rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset whitespace-nowrap ${cs.chip}`}
+                              >
+                                {cs.label}
+                              </span>
+                              <span className="w-full text-xs text-[var(--ink-muted)] sm:w-auto sm:flex-1">
+                                {c.rationale}
+                              </span>
+                            </div>
+                          );
+                        })}
+                        <p className="text-xs text-[var(--ink-muted)]">
+                          {mappedControls.length === 0
+                            ? "No controls mapped"
+                            : `Mapped to ${mappedControls.join(", ")}`}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-2">
+                        {activeReview.suggested_control_refs.map((ref) => {
+                          const on = mappedControls.includes(ref);
+                          return (
+                            <button
+                              key={ref}
+                              onClick={() =>
+                                setMappedControls((prev) =>
+                                  on ? prev.filter((c) => c !== ref) : [...prev, ref],
+                                )
+                              }
+                              className={`rounded-full px-2.5 py-1 font-mono text-xs font-medium ring-1 ring-inset transition-colors ${
+                                on
+                                  ? "bg-[var(--accent)] text-[var(--accent-ink)] ring-[var(--accent)]"
+                                  : "bg-[var(--surface)] text-[var(--ink-muted)] ring-[var(--border-strong)] hover:bg-[var(--surface-raised)]"
+                              }`}
+                            >
+                              {on ? "✓ " : "+ "}
+                              {ref}
+                            </button>
+                          );
+                        })}
+                        <span className="text-xs text-[var(--ink-muted)]">
+                          {mappedControls.length === 0
+                            ? "No controls mapped"
+                            : `Mapped to ${mappedControls.join(", ")}`}
+                        </span>
+                      </div>
+                    )}
+                  </Field>
+
+                  {activeReview.flags.length > 0 && (
+                    <Field label={`Flags (${activeReview.flags.length})`}>
+                      <p className="mb-2 text-xs text-[var(--ink-muted)]">
+                        Tick the items you want the stakeholder to address, then draft the follow-up.
+                      </p>
+                      <ul className="space-y-2">
+                        {activeReview.flags.map((f) => {
+                          const s = severityStyle(f.severity);
+                          const checked = selectedFlags.includes(f.id);
+                          return (
+                            <li key={f.id}>
+                              <label
+                                className={`flex cursor-pointer gap-3 rounded-md border p-3 transition-colors ${s.chip} ${
+                                  checked ? "ring-1 ring-[var(--border-strong)]" : ""
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleFlag(f.id)}
+                                  className="mt-0.5 size-4 shrink-0 accent-[var(--accent)]"
+                                />
+                                <span className="min-w-0">
+                                  <span className="flex flex-wrap items-center gap-2">
+                                    <span className={`size-1.5 rounded-full ${s.dot}`} aria-hidden />
+                                    <span className="text-sm font-medium text-[var(--ink)]">{f.title}</span>
+                                    <span className="text-[11px] font-medium tracking-wide text-[var(--ink-faint)] uppercase">
+                                      {s.label}
+                                    </span>
+                                  </span>
+                                  <span className="mt-1 block text-sm text-[var(--ink-secondary)]">{f.detail}</span>
+                                  {f.location && (
+                                    <span className="mt-1 block font-mono text-[11px] text-[var(--ink-faint)]">
+                                      {f.location}
+                                    </span>
+                                  )}
+                                </span>
+                              </label>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                      <button
+                        onClick={draftFromFlags}
+                        disabled={selectedFlags.length === 0}
+                        className="mt-3 rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-[var(--ink-secondary)] transition-colors hover:bg-[var(--surface-raised)] disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        <p className="font-mono text-[11px] text-[var(--ink-faint)]">{e.location}</p>
-                        <p className="mt-1 text-sm text-[var(--ink-secondary)] italic">&ldquo;{e.text}&rdquo;</p>
-                      </li>
-                    ))}
-                  </ul>
-                </Field>
+                        Draft follow-up from {selectedFlags.length || "selected"} flag
+                        {selectedFlags.length === 1 ? "" : "s"}
+                      </button>
+                    </Field>
+                  )}
+
+                  {activeReview.excerpts.length > 0 && (
+                    <Field label="Source excerpts">
+                      <p className="mb-2 text-xs text-[var(--ink-muted)]">
+                        What the model actually read. Every conclusion above should trace back to one of these.
+                      </p>
+                      <ul className="space-y-2">
+                        {activeReview.excerpts.map((e) => (
+                          <li
+                            key={e.location}
+                            className="rounded-md border border-[var(--border)] bg-[var(--surface-raised)] p-3"
+                          >
+                            <p className="font-mono text-[11px] text-[var(--ink-faint)]">{e.location}</p>
+                            <p className="mt-1 text-sm text-[var(--ink-secondary)] italic">&ldquo;{e.text}&rdquo;</p>
+                          </li>
+                        ))}
+                      </ul>
+                    </Field>
+                  )}
+                </>
               )}
             </div>
           </section>
         ) : (
           <section className="rounded-[14px] border border-[var(--border)] bg-[var(--surface)] p-8 text-center">
             <p className="text-sm font-medium text-[var(--ink-secondary)]">
-              {request.files.length > 0 ? "AI analysis in progress…" : "No evidence uploaded yet"}
+              {activeFile
+                ? "Not analyzed yet"
+                : request.files.length > 0
+                  ? "Select a file to analyze"
+                  : "No evidence uploaded yet"}
             </p>
             <p className="mt-1 text-sm text-[var(--ink-muted)]">
-              {request.files.length > 0
-                ? "Extraction, classification, and control mapping usually take under a minute."
-                : `Waiting on ${stakeholder.full_name}, or upload it yourself below. The upload link was also emailed and does not require a login.`}
+              {activeFile
+                ? `Click Analyze to get a control-aware compliance verdict for ${activeFile.filename} against ${request.control_ref}.`
+                : request.files.length === 0
+                  ? `Waiting on ${stakeholder.full_name}, or upload it yourself below. The upload link was also emailed and does not require a login.`
+                  : "Pick a file above to analyze it."}
             </p>
-            {request.files.length === 0 && (
+            {analysisState === "error" && analysisError && (
+              <p className="mt-2 text-sm font-medium text-[var(--status-rose-ink)]">{analysisError}</p>
+            )}
+            {activeFile ? (
               <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploadState === "uploading"}
+                onClick={handleAnalyze}
+                disabled={analysisState === "analyzing"}
                 className="mt-4 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-ink)] transition-[background-color,transform,box-shadow] duration-[180ms] ease-[cubic-bezier(0.4,0,0.2,1)] hover:-translate-y-px hover:bg-[var(--accent-hover)] hover:shadow-[var(--shadow-hover)] disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none disabled:opacity-60"
               >
-                {uploadState === "uploading" ? "Uploading…" : "Upload evidence"}
+                {analysisState === "analyzing" ? "Analyzing…" : "Analyze"}
               </button>
+            ) : (
+              request.files.length === 0 && (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadState === "uploading"}
+                  className="mt-4 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-ink)] transition-[background-color,transform,box-shadow] duration-[180ms] ease-[cubic-bezier(0.4,0,0.2,1)] hover:-translate-y-px hover:bg-[var(--accent-hover)] hover:shadow-[var(--shadow-hover)] disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none disabled:opacity-60"
+                >
+                  {uploadState === "uploading" ? "Uploading…" : "Upload evidence"}
+                </button>
+              )
             )}
           </section>
         )}

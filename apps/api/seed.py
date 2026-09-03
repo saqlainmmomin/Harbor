@@ -80,7 +80,14 @@ def main() -> None:
                     INSERT INTO engagements (id, name, client_name, framework, period_start, period_end, lead_auditor)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
-                    ("eng_001", "SOC 2 Type II — FY26", "Northwind Logistics, Inc.", "SOC2", "2025-07-01", "2026-06-30", "A. Rao"),
+                    # SOC2 dropped from VALID_FRAMEWORKS (see main.py) -- ISO27001
+                    # is the smallest-diff replacement so the seeded engagement
+                    # keeps working with the new framework set out of the box,
+                    # rather than 400ing on the very first API call that
+                    # validates its framework. main.py's ensure_engagement_schema
+                    # backfills engagement_frameworks from this legacy column on
+                    # every request, so this single value is all that's needed.
+                    ("eng_001", "ISO 27001 — FY26", "Northwind Logistics, Inc.", "ISO27001", "2025-07-01", "2026-06-30", "A. Rao"),
                 )
 
             cur.execute("SELECT id FROM stakeholders WHERE id = %s", ("s1",))
