@@ -114,7 +114,7 @@ export function NewEngagementForm({ leadAuditorName }: { leadAuditorName: string
                 required
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="SOC 2 Type II, FY26"
+                placeholder="ISO 27001, FY26"
                 className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
               />
             </Field>

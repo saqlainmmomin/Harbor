@@ -35,7 +35,7 @@ export function ProductPreview() {
       {/* Translucent floating header bar -- layered above the split, not part of it */}
       <div className="relative z-30 mx-auto -mb-7 flex w-[92%] max-w-2xl flex-wrap items-center justify-between gap-4 rounded-2xl border border-black/[0.06] bg-white/90 px-7 py-4 shadow-[0_20px_50px_-15px_rgba(20,23,28,0.25)] backdrop-blur-md sm:gap-8">
         <HeaderStat label="Organization" value="Acme Corporation" />
-        <HeaderStat label="Engagement" value="SOC 2 Type II" />
+        <HeaderStat label="Engagement" value="ISO 27001" />
         <HeaderStat label="Readiness" value="On track" accent />
       </div>
 

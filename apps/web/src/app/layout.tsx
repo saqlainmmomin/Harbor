@@ -9,7 +9,7 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: "AI Audit Copilot",
-  description: "Request, track, and review SOC 2 audit evidence.",
+  description: "Scope, request, track, and review audit evidence against ISO 27001, NIST CSF, and PCI-DSS.",
 };
 
 // No ClerkProvider here deliberately — this layout also wraps /upload/[token]

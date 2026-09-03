@@ -366,7 +366,7 @@ export const evidenceRequests: EvidenceRequest[] = [
     engagement_id: "eng_001",
     control_ref: "CC9.2",
     title: "Vendor risk assessments: critical vendors",
-    description: "Most recent risk assessment and SOC 2 report review for each critical vendor.",
+    description: "Most recent risk assessment and third-party audit report review for each critical vendor.",
     stakeholder_id: "s5",
     status: "awaiting_upload",
     due_date: "2026-08-07",
