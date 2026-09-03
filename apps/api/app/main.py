@@ -12,10 +12,10 @@ import resend
 from resend.emails._emails import Emails
 from resend.exceptions import ResendError
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from fastapi import UploadFile, File
+from fastapi import UploadFile, File, Form
 from supabase import create_client
 from storage3.exceptions import StorageApiError
 import uuid
@@ -27,7 +27,7 @@ from groq import Groq
 dotenv_path = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path, override=True)
 
-from app.auth import get_current_auditor_id
+from app.auth import AuditorIdentity, get_current_auditor, get_current_auditor_id, verify_bearer_token
 from app.upload_lookup import (
     RequestDetailResponse,
     UploadLookupResponse,
@@ -36,7 +36,7 @@ from app.upload_lookup import (
     list_requests_for_engagement,
     lookup_upload,
 )
-from app.services.scope_profiler import compute_scope_multi, get_framework, validate_scope_answers_complete
+from app.services.scope_profiler import compute_scope_multi, get_framework, validate_scope_answers
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPLOAD_BASE_URL = os.getenv("UPLOAD_BASE_URL", "http://localhost:3000/upload")
@@ -223,12 +223,43 @@ def ensure_engagement_schema(cur) -> None:
     # engagement_frameworks rows with framework='SOC2' -- ADD CONSTRAINT below
     # would fail outright against those rows, taking down every request that
     # calls this function (i.e. almost every endpoint) rather than just the
-    # engagements that used SOC2. Clear the now-unsupported rows first so the
-    # constraint change is safe to apply on a live database, not just a fresh
-    # one. This drops the SOC2 *tag* from any engagement that had it; nothing
-    # else about that engagement is touched, and its legacy `engagements.framework`
-    # value (below) is left as historical record, not migrated in place --
-    # see the explicit product decision in this session's Results section.
+    # engagements that used SOC2.
+    #
+    # Codex review finding #2: an earlier version of this migration just
+    # DELETEd the unsupported rows outright, with no mapping, archive, or
+    # rollback path -- a real engagement's SOC2 association was gone with no
+    # way to recover it or even prove afterward what it used to be. Instead:
+    # copy every about-to-be-removed row into an archive table first (same
+    # idempotent-lazy-DDL pattern as the rest of this function), THEN clear
+    # them from the live table so the constraint change is safe to apply.
+    #
+    # Verification query (confirms nothing was silently lost -- run after
+    # this migration on a live database):
+    #   SELECT engagement_id, framework, archived_at FROM engagement_frameworks_archive;
+    # Rollback (restores an archived association, e.g. if SOC2 support
+    # returns as a real product decision later -- requires re-adding 'SOC2'
+    # to the CHECK constraint above first):
+    #   INSERT INTO engagement_frameworks (engagement_id, framework)
+    #   SELECT engagement_id, framework FROM engagement_frameworks_archive
+    #   WHERE framework = 'SOC2' ON CONFLICT DO NOTHING;
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS engagement_frameworks_archive (
+            engagement_id TEXT NOT NULL,
+            framework TEXT NOT NULL,
+            archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (engagement_id, framework)
+        )
+        """
+    )
+    cur.execute(
+        """
+        INSERT INTO engagement_frameworks_archive (engagement_id, framework)
+        SELECT engagement_id, framework FROM engagement_frameworks
+        WHERE framework NOT IN ('ISO27001', 'NIST_CSF', 'PCI_DSS')
+        ON CONFLICT (engagement_id, framework) DO NOTHING
+        """
+    )
     cur.execute("DELETE FROM engagement_frameworks WHERE framework NOT IN ('ISO27001', 'NIST_CSF', 'PCI_DSS')")
     cur.execute("ALTER TABLE engagement_frameworks DROP CONSTRAINT IF EXISTS engagement_frameworks_framework_check")
     cur.execute(
@@ -503,23 +534,31 @@ def bulk_create_evidence_requests(
     if not payload.items:
         raise HTTPException(status_code=400, detail="items must not be empty")
 
-    db = get_db_connection()
-    with db.cursor() as cur:
-        ensure_stakeholder_schema(cur)
-        ensure_bulk_idempotency_schema(cur)
+    # A dedicated connection for this endpoint, not the shared app.state.db
+    # (see _connect_db's own docstring: one long-lived connection for the
+    # whole process). The idempotency-key reservation below (Codex review
+    # finding #7) depends on Postgres's own row lock making one concurrent
+    # caller's transaction genuinely wait on another's -- two callers
+    # sharing one physical connection can't get that: a second `with
+    # db.transaction()` opened on an already-open connection nests as a
+    # savepoint inside the first caller's still-uncommitted transaction
+    # instead of being a real, independently-committed transaction, which
+    # defeats the whole reservation guarantee. This endpoint's writes don't
+    # need to be visible through the shared connection's session state, so
+    # a plain, independent connection per call is the smallest fix that
+    # makes the guarantee real. Closed in `finally` since it isn't pooled.
+    db = psycopg.connect(DATABASE_URL)
+    db.autocommit = True
+    try:
+        with db.cursor() as cur:
+            ensure_stakeholder_schema(cur)
+            ensure_bulk_idempotency_schema(cur)
 
-        cur.execute("SELECT id FROM engagements WHERE id = %s", (engagement_id,))
-        if cur.fetchone() is None:
-            raise HTTPException(status_code=404, detail="Engagement not found")
+            cur.execute("SELECT id FROM engagements WHERE id = %s", (engagement_id,))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Engagement not found")
 
-        if payload.idempotency_key:
-            cur.execute(
-                "SELECT request_ids FROM bulk_request_idempotency WHERE engagement_id = %s AND idempotency_key = %s",
-                (engagement_id, payload.idempotency_key),
-            )
-            existing = cur.fetchone()
-            if existing is not None:
-                request_ids = existing[0]
+            def _fetch_created(request_ids: list[str]) -> list[dict[str, Any]]:
                 cur.execute(
                     "SELECT id, engagement_id, control_ref, title, description, stakeholder_id, status, "
                     "due_date, sent_at, reminder_count, last_activity_at FROM evidence_requests WHERE id = ANY(%s)",
@@ -535,49 +574,101 @@ def bulk_create_evidence_requests(
                     }
                     for r in rows
                 }
-                return {"created": [by_id[rid] for rid in request_ids if rid in by_id]}
+                return [by_id[rid] for rid in request_ids if rid in by_id]
 
-        # Validate every item up front -- engagement match + stakeholder
-        # ownership -- so a failure partway through the list never leaves
-        # some rows inserted and others not (see docstring above).
-        stakeholder_ids = {item.stakeholder_id for item in payload.items}
-        cur.execute(
-            "SELECT id FROM stakeholders WHERE engagement_id = %s AND id = ANY(%s)",
-            (engagement_id, list(stakeholder_ids)),
-        )
-        owned_stakeholder_ids = {r[0] for r in cur.fetchall()}
-        missing = stakeholder_ids - owned_stakeholder_ids
-        if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Stakeholder(s) not found for this engagement: {sorted(missing)}",
-            )
-
-        created = []
-        # Explicit transaction block -- the connection is autocommit (see
-        # _connect_db) so each statement would otherwise commit on its own;
-        # this makes the whole batch (every insert + the idempotency record)
-        # succeed or roll back together, same all-or-nothing guarantee the
-        # up-front validation above is there to make normally unnecessary.
-        with db.transaction():
-            for item in payload.items:
-                row_payload = CreateEvidenceRequestPayload(
-                    engagement_id=engagement_id,
-                    stakeholder_id=item.stakeholder_id,
-                    control_ref=item.control_ref,
-                    title=item.title,
-                    description=item.description,
-                    due_date=item.due_date,
+            def _validate_stakeholder_ownership() -> None:
+                stakeholder_ids = {item.stakeholder_id for item in payload.items}
+                cur.execute(
+                    "SELECT id FROM stakeholders WHERE engagement_id = %s AND id = ANY(%s)",
+                    (engagement_id, list(stakeholder_ids)),
                 )
-                created.append(_create_evidence_request_row(cur, row_payload))
+                owned_stakeholder_ids = {r[0] for r in cur.fetchall()}
+                missing = stakeholder_ids - owned_stakeholder_ids
+                if missing:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Stakeholder(s) not found for this engagement: {sorted(missing)}",
+                    )
+
+            def _insert_batch() -> list[dict[str, Any]]:
+                rows = []
+                for item in payload.items:
+                    row_payload = CreateEvidenceRequestPayload(
+                        engagement_id=engagement_id,
+                        stakeholder_id=item.stakeholder_id,
+                        control_ref=item.control_ref,
+                        title=item.title,
+                        description=item.description,
+                        due_date=item.due_date,
+                    )
+                    rows.append(_create_evidence_request_row(cur, row_payload))
+                return rows
 
             if payload.idempotency_key:
-                cur.execute(
-                    "INSERT INTO bulk_request_idempotency (engagement_id, idempotency_key, request_ids) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (engagement_id, idempotency_key) DO NOTHING",
-                    (engagement_id, payload.idempotency_key, json.dumps([c["id"] for c in created])),
-                )
-    return {"created": created}
+                # Codex review finding #7: the previous version checked
+                # "does a row for this key exist yet" and inserted the
+                # idempotency record only *after* creating every row -- two
+                # concurrent retries with the same key could both pass that
+                # check, both insert a full duplicate set of
+                # evidence_requests rows, and then only one of them would
+                # win the final `ON CONFLICT DO NOTHING` on the idempotency
+                # record itself. The duplicate evidence_requests rows were
+                # never rolled back.
+                #
+                # Fixed by reserving the key FIRST, inside the same
+                # transaction as the batch it guards, via a real unique
+                # constraint (the table's primary key) instead of a
+                # check-then-act read. Two concurrent callers (now each on
+                # their own connection -- see above) both attempt this
+                # INSERT; Postgres's row lock on the primary key means only
+                # one can actually insert it -- the loser's statement blocks
+                # until the winner's transaction commits (or rolls back),
+                # then sees a definitive, already-committed outcome instead
+                # of a race. If we don't win the reservation, the batch was
+                # (or is about to be, by the transaction we just blocked
+                # behind) created by that other request -- fetch and return
+                # its real, already-committed rows rather than creating a
+                # second set.
+                with db.transaction():
+                    cur.execute(
+                        "INSERT INTO bulk_request_idempotency (engagement_id, idempotency_key, request_ids) "
+                        "VALUES (%s, %s, '[]'::jsonb) ON CONFLICT (engagement_id, idempotency_key) DO NOTHING "
+                        "RETURNING 1",
+                        (engagement_id, payload.idempotency_key),
+                    )
+                    reserved = cur.fetchone() is not None
+                    if not reserved:
+                        cur.execute(
+                            "SELECT request_ids FROM bulk_request_idempotency WHERE engagement_id = %s AND idempotency_key = %s",
+                            (engagement_id, payload.idempotency_key),
+                        )
+                        existing = cur.fetchone()
+                        request_ids = existing[0] if existing else []
+                        return {"created": _fetch_created(request_ids)}
+
+                    # We hold the reservation -- validate, create the batch,
+                    # and record the real request ids on the row we just
+                    # reserved, all still inside this one transaction. If
+                    # anything raises (validation, insert failure), the
+                    # reservation itself rolls back too, so a retry with the
+                    # same key isn't permanently blocked by a half-finished
+                    # attempt.
+                    _validate_stakeholder_ownership()
+                    created = _insert_batch()
+                    cur.execute(
+                        "UPDATE bulk_request_idempotency SET request_ids = %s WHERE engagement_id = %s AND idempotency_key = %s",
+                        (json.dumps([c["id"] for c in created]), engagement_id, payload.idempotency_key),
+                    )
+                return {"created": created}
+
+            # No idempotency key -- validate up front, then insert the whole
+            # batch atomically (all-or-nothing, same guarantee as above).
+            _validate_stakeholder_ownership()
+            with db.transaction():
+                created = _insert_batch()
+        return {"created": created}
+    finally:
+        db.close()
 
 
 @app.post("/evidence-requests/{request_id}/send", response_model=SendEvidenceRequestResponse)
@@ -669,7 +760,11 @@ DECISION_ACTION = {
 class SubmitDecisionPayload(BaseModel):
     decision: str
     note: str = ""
-    decided_by: str
+    # Deliberately NOT trusted as the actor identity anymore -- see Codex
+    # review "audit-trail actor remains caller-controlled" and submit_decision
+    # below. Accepted (optional) only so an older frontend build that still
+    # sends it doesn't 422; the value is never read.
+    decided_by: str | None = None
 
 
 def ensure_review_decisions_schema(cur) -> None:
@@ -694,10 +789,21 @@ def ensure_review_decisions_schema(cur) -> None:
 # activity_log entry, all in one commit.
 @app.post("/evidence-requests/{request_id}/decision")
 def submit_decision(
-    request_id: str, payload: SubmitDecisionPayload, auditor_id: str = Depends(get_current_auditor_id)
+    request_id: str,
+    payload: SubmitDecisionPayload,
+    auditor: AuditorIdentity = Depends(get_current_auditor),
 ) -> dict[str, Any]:
     if payload.decision not in VALID_DECISIONS:
         raise HTTPException(status_code=400, detail=f"decision must be one of {sorted(VALID_DECISIONS)}")
+
+    # Codex review: "audit-trail actor remains caller-controlled" -- this
+    # used to persist payload.decided_by (an arbitrary client-supplied
+    # string) as the decision's actor, so an authenticated user could forge
+    # who the audit trail says made the call. The stored/displayed actor now
+    # always comes from the verified Clerk token (see app/auth.py's
+    # get_current_auditor / _resolve_display_name), never from the request
+    # body.
+    decided_by = auditor.display_name
 
     db = get_db_connection()
     with db.cursor() as cur:
@@ -709,13 +815,13 @@ def submit_decision(
         decision_id = f"dec_{uuid.uuid4().hex}"
         cur.execute(
             "INSERT INTO review_decisions (id, request_id, decision, note, decided_by) VALUES (%s, %s, %s, %s, %s)",
-            (decision_id, request_id, payload.decision, payload.note or None, payload.decided_by),
+            (decision_id, request_id, payload.decision, payload.note or None, decided_by),
         )
         cur.execute(
             "UPDATE evidence_requests SET status = %s, last_activity_at = NOW() WHERE id = %s",
             (DECISION_STATUS[payload.decision], request_id),
         )
-        log_activity(cur, request_id, payload.decided_by, "auditor", DECISION_ACTION[payload.decision], payload.note or None)
+        log_activity(cur, request_id, decided_by, "auditor", DECISION_ACTION[payload.decision], payload.note or None)
         cur.execute("SELECT decided_at FROM review_decisions WHERE id = %s", (decision_id,))
         decided_at = cur.fetchone()[0]
         db.commit()
@@ -724,7 +830,7 @@ def submit_decision(
         "id": decision_id,
         "decision": payload.decision,
         "note": payload.note,
-        "decided_by": payload.decided_by,
+        "decided_by": decided_by,
         "decided_at": decided_at.isoformat() if decided_at else "",
     }
 
@@ -893,50 +999,59 @@ def compute_engagement_scope(
         # documents.
         answers_by_registry_key = {fw.lower(): payload.scope_answers.get(fw, {}) for fw in payload.frameworks}
 
-        # Reject an incomplete answer set outright rather than silently
-        # treating a missing answer as "no" -- see scope_profiler.py's own
-        # defense-in-depth for why a missing PCI.SCP.2 in particular must
-        # never be read as "no e-commerce channels" (that's what excludes
-        # PCI.6.6). Every scope_question the selected framework(s) define
-        # must have an explicit answer key present in the submitted payload.
-        incomplete = validate_scope_answers_complete(answers_by_registry_key)
-        if incomplete:
+        # Reject an incomplete OR invalid answer set outright rather than
+        # silently treating a missing/garbage answer as "no" -- see
+        # scope_profiler.py's own defense-in-depth for why a missing or
+        # invalid PCI.SCP.2 in particular must never be read as "no
+        # e-commerce channels" (that's what excludes PCI.6.6). Every
+        # scope_question the selected framework(s) define must have an
+        # explicit, recognized-value answer present in the submitted
+        # payload -- an unknown question id, wrong type, or unrecognized
+        # option value is rejected the same as a missing one.
+        answer_errors = validate_scope_answers(answers_by_registry_key)
+        if answer_errors:
             raise HTTPException(
                 status_code=422,
-                detail={"message": "Scope answers are incomplete", "missing_question_ids": incomplete},
+                detail={"message": "Scope answers are incomplete or invalid", "errors": answer_errors},
             )
 
         result = compute_scope_multi(answers_by_registry_key)
 
-        cur.execute(
-            """
-            INSERT INTO engagement_scope (engagement_id, frameworks, scope_answers, computed_checklist, computed_at)
-            VALUES (%s, %s, %s, %s, NOW())
-            ON CONFLICT (engagement_id) DO UPDATE SET
-                frameworks = EXCLUDED.frameworks,
-                scope_answers = EXCLUDED.scope_answers,
-                computed_checklist = EXCLUDED.computed_checklist,
-                computed_at = NOW()
-            """,
-            (engagement_id, json.dumps(payload.frameworks), json.dumps(payload.scope_answers), json.dumps(result)),
-        )
-
-        # Make the persisted scope selection the single source of truth for
-        # analysis too (see POST /evidence-files/{id}/analyze, which reads
-        # engagement_frameworks to resolve control_ref against a
-        # FrameworkDefinition). Without this, selecting ISO/NIST/PCI in the
-        # scope step didn't register that framework for analysis unless it
-        # was also passed to POST /engagements at creation time -- the
-        # analyzer would silently fall back to the generic prompt for a
-        # framework the auditor explicitly selected here. Additive only:
-        # union with engagement_frameworks, never removes a framework chosen
-        # at engagement creation.
-        for fw in payload.frameworks:
+        # One transaction: the scope row and engagement_frameworks (the
+        # analyzer's own source of truth, see POST /evidence-files/{id}/analyze)
+        # move together, or neither does.
+        with db.transaction():
             cur.execute(
-                "INSERT INTO engagement_frameworks (engagement_id, framework) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (engagement_id, fw),
+                """
+                INSERT INTO engagement_scope (engagement_id, frameworks, scope_answers, computed_checklist, computed_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (engagement_id) DO UPDATE SET
+                    frameworks = EXCLUDED.frameworks,
+                    scope_answers = EXCLUDED.scope_answers,
+                    computed_checklist = EXCLUDED.computed_checklist,
+                    computed_at = NOW()
+                """,
+                (engagement_id, json.dumps(payload.frameworks), json.dumps(payload.scope_answers), json.dumps(result)),
             )
-        db.commit()
+
+            # Make the persisted scope selection the single source of truth
+            # for analysis too. Codex review finding #6: this used to be
+            # additive-only (INSERT ... ON CONFLICT DO NOTHING), so
+            # re-scoping to drop a framework never removed it from
+            # engagement_frameworks -- a second scope submission could leave
+            # a stale, deselected framework still analyzable. Delete/replace
+            # the whole set on every submission instead: this scope
+            # submission's framework list becomes the complete, current
+            # engagement_frameworks set, not a superset of it.
+            cur.execute(
+                "DELETE FROM engagement_frameworks WHERE engagement_id = %s AND NOT (framework = ANY(%s))",
+                (engagement_id, payload.frameworks),
+            )
+            for fw in payload.frameworks:
+                cur.execute(
+                    "INSERT INTO engagement_frameworks (engagement_id, framework) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (engagement_id, fw),
+                )
 
     return ScopeResponse(**result)
 
@@ -1130,8 +1245,48 @@ def log_activity(cur, request_id: str, actor: str, actor_type: str, action: str,
     )
 
 
+def _upload_credential_is_valid(cur, request_id: str, token: str | None, authorization: str | None) -> bool:
+    """Two independent, legitimate ways to be allowed to upload a file to
+    one evidence request -- an authenticated auditor (re-uploading from the
+    review panel), or the stakeholder holding that request's own magic-link
+    token. Codex review "public upload credential bypass": this endpoint
+    used to accept neither check -- it was reachable by `request_id` alone,
+    with no token and no auth, even though the magic-link design (see
+    GET /upload/{token} / upload_lookup.py) treats the token as the real
+    credential. request_id values are opaque but not secret (they appear in
+    every auditor-facing response), so "know the id" was never actually
+    equivalent to "hold the link"."""
+    if authorization and authorization.startswith("Bearer "):
+        bearer = authorization[len("Bearer "):].strip()
+        if bearer:
+            try:
+                verify_bearer_token(bearer)
+                return True
+            except Exception:
+                pass  # fall through to the token check below
+    if token:
+        cur.execute("SELECT token FROM evidence_requests WHERE id = %s", (request_id,))
+        row = cur.fetchone()
+        if row and row[0] and secrets.compare_digest(row[0], token):
+            return True
+    return False
+
+
 @app.post("/evidence-requests/{request_id}/upload")
-def upload_evidence_file(request_id: str, file: UploadFile = File(...)):
+def upload_evidence_file(
+    request_id: str,
+    file: UploadFile = File(...),
+    token: str | None = Form(default=None),
+    authorization: str | None = Header(default=None),
+):
+    db = get_db_connection()
+    with db.cursor() as cur:
+        if not _upload_credential_is_valid(cur, request_id, token, authorization):
+            raise HTTPException(
+                status_code=403,
+                detail="A valid upload token or auditor session is required",
+            )
+
     # only accept PDFs for this first-pass implementation
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF uploads are supported")

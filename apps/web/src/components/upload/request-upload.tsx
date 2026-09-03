@@ -31,16 +31,21 @@ export function RequestUpload({
   request,
   stakeholder,
   auditor,
+  token,
 }: {
   request: EvidenceRequest;
   stakeholder: Stakeholder;
   auditor: AuditorContact;
+  /** The magic-link token this page was loaded with -- the credential the
+   * backend now requires for this public, unauthenticated upload flow (see
+   * uploadEvidenceFile in lib/api.ts). */
+  token: string;
 }) {
   if (request.status === "approved") {
     return <AlreadyDone request={request} auditor={auditor} />;
   }
 
-  return <UploadForm request={request} stakeholder={stakeholder} auditor={auditor} />;
+  return <UploadForm request={request} stakeholder={stakeholder} auditor={auditor} token={token} />;
 }
 
 function Header({ auditor }: { auditor: AuditorContact }) {
@@ -84,10 +89,12 @@ function UploadForm({
   request,
   stakeholder,
   auditor,
+  token,
 }: {
   request: EvidenceRequest;
   stakeholder: Stakeholder;
   auditor: AuditorContact;
+  token: string;
 }) {
   const [files, setFiles] = useState<PickedFile[]>([]);
   const [note, setNote] = useState("");
@@ -129,7 +136,7 @@ function UploadForm({
     for (const f of files) {
       if (f.status === "done") continue;
       setFiles((prev) => prev.map((x) => (x.id === f.id ? { ...x, status: "uploading" } : x)));
-      const result = await uploadEvidenceFile(request.id, f.file);
+      const result = await uploadEvidenceFile(request.id, f.file, token);
       setFiles((prev) =>
         prev.map((x) =>
           x.id === f.id
@@ -288,12 +295,14 @@ function UploadForm({
                     </button>
                   )}
                 </div>
+                {/* `received` is always false now -- extraction happens
+                    before storage and a post-storage DB failure deletes the
+                    object, so every upload failure means nothing was saved
+                    (see uploadEvidenceFile in lib/api.ts, Codex review
+                    finding #11). No "received but not reviewed yet" case
+                    exists anymore; always show the real failure. */}
                 {f.status === "error" && (
-                  <p className="mt-1 pl-1 text-xs text-rose-600">
-                    {f.received
-                      ? "Received, but automatic review didn't finish. An auditor will still see this file."
-                      : `Didn't go through: ${f.errorMessage}`}
-                  </p>
+                  <p className="mt-1 pl-1 text-xs text-rose-600">{`Didn't go through: ${f.errorMessage}`}</p>
                 )}
               </li>
             ))}
