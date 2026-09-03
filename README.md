@@ -1,12 +1,27 @@
 # AI Audit Copilot
 
-AI-assisted workflow for requesting, tracking, and reviewing SOC 2 audit
-evidence. An auditor sends a stakeholder a magic link; the stakeholder
-uploads a PDF; the backend extracts its text, sends it to Groq for a
-structured compliance review, and the auditor sees the result (with a
-code-based placeholder-detection floor under the model's judgment) in a
-real operational dashboard — evidence, requests, and each request's full
-AI analysis, decision, and activity history.
+AI-assisted workflow for scoping, requesting, tracking, and reviewing audit
+evidence against ISO 27001, NIST CSF, or PCI-DSS (SOC 2 support was dropped
+in favor of these three). An auditor answers a handful of scope questions
+for an engagement and gets back a computed, control-mapped evidence
+checklist; that checklist becomes a draft RFI (request-for-information)
+item list, which the auditor turns into real evidence requests sent to
+stakeholders via magic link. A stakeholder uploads a PDF; the auditor then
+explicitly triggers a control-aware AI review (Groq) of that one file
+against the specific control its request is for — a real verdict
+(met/partial/not met) with a quoted excerpt and concrete next evidence to
+collect, not a generic document summary — and sees it in a real operational
+dashboard alongside decision and activity history.
+
+> **2026-09-03 backend work** (scope engine, RFI generation, control-aware
+> analysis) is done, committed, and verified end-to-end against a live
+> server with real Groq/Supabase calls — see
+> [`tasks/handoffs/2026-09-03-backend-scope-rfi-analysis.md`](tasks/handoffs/2026-09-03-backend-scope-rfi-analysis.md)
+> for the full API contract and real curl verification output. The
+> matching frontend (scope UI, RFI review screen, review-panel "Analyze"
+> button) is being built in a separate session against that contract —
+> see [`tasks/handoffs/2026-09-03-frontend-scope-rfi-analysis.md`](tasks/handoffs/2026-09-03-frontend-scope-rfi-analysis.md).
+> The plan behind both: [`docs/audit-evidence-workflow-brief.md`](docs/audit-evidence-workflow-brief.md).
 
 ## Architecture
 
@@ -44,8 +59,11 @@ ai_audit_copilot/
 │   │           └── format.ts    # date/label helpers
 │   └── api/                     # FastAPI (not yet deployed), see apps/api/README.md
 │       ├── app/
-│       │   ├── main.py          # engagement lookup, magic-link send, PDF upload + AI review, activity log
-│       │   └── upload_lookup.py # token/id → request/stakeholder/auditor resolution
+│       │   ├── main.py              # engagements, magic-link send, upload, scope/RFI/analyze endpoints, activity log
+│       │   ├── upload_lookup.py     # token/id → request/stakeholder/auditor resolution
+│       │   ├── frameworks/          # ISO 27001 / NIST CSF / PCI-DSS control + scope-question definitions
+│       │   └── services/
+│       │       └── scope_profiler.py  # scope-answer → excluded controls + evidence checklist
 │       ├── seed.py              # local test data
 │       └── tests/                # smoke tests
 └── README.md
@@ -77,15 +95,32 @@ OpenAPI schema.
   path-matching — see comments in `src/proxy.ts` for why). `/upload/[token]`
   and the public landing page (`/`) stay completely outside Clerk —
   stakeholders and anonymous visitors never touch it.
-- **Evidence upload → AI review pipeline**: PDF upload extracts text
-  (`pypdf`), sends it to Groq (`openai/gpt-oss-120b`) for a structured
-  review (`document_type`, `summary`, `suggested_controls`,
-  `missing_sections`, `completeness_label`), with a code-based floor that
-  caps `completeness_label` at `partial` if the document still has unfilled
-  `[template placeholders]` — deliberately not left to the model's judgment.
-  Actually wired to a real submit button on the stakeholder upload form
-  (sequential per-file, with honest partial-failure states) — it used to be
-  a `setTimeout` stub that never called the backend at all.
+- **Scope engine**: an auditor answers a framework's scope questions
+  (`GET /frameworks/{id}/scope-questions`, `POST/GET /engagements/{id}/scope`)
+  and gets back applicable controls, excluded controls (with a reason, e.g.
+  "no cloud usage" excluding cloud-specific ISO controls), and a control-
+  mapped evidence checklist — real rule tables per framework in
+  `app/services/scope_profiler.py`, not a static list.
+- **RFI generation + bulk create**: the evidence checklist becomes a draft
+  RFI item list (`POST /engagements/{id}/generate-rfi`, review/edit-only,
+  writes nothing), which the auditor turns into real `evidence_requests`
+  rows in one call (`POST /engagements/{id}/evidence-requests/bulk`),
+  sharing the same insert/activity-log logic as the original single-item
+  create endpoint.
+- **Evidence upload, decoupled from AI review**: PDF upload extracts text
+  (`pypdf`) and stores it, but no longer triggers AI review automatically —
+  that used to happen inline on every upload regardless of whether the
+  auditor was ready to look at it. The auditor now explicitly triggers a
+  **control-aware analysis** (`POST /evidence-files/{file_id}/analyze`) of
+  one file against the specific control its request is for (looked up from
+  the ported ISO 27001/NIST CSF/PCI-DSS control library, with a graceful
+  generic fallback if the request's `control_ref` doesn't match a known
+  control), returning `compliance_status`, `current_state`,
+  `gap_description`, `evidence_quote`, `risk_level`, and
+  `follow_up_evidence` (a concrete next document to collect, not "provide
+  more documentation"). Wired to a real submit button on the stakeholder
+  upload form (sequential per-file, with honest partial-failure states) —
+  it used to be a `setTimeout` stub that never called the backend at all.
 - **Real document preview**: the review panel renders the actual PDF via a
   short-lived Supabase signed URL (`GET /evidence-files/{id}/preview-url`)
   — there used to be no way to see a file's content anywhere in the app.
@@ -107,6 +142,12 @@ OpenAPI schema.
 
 **Known gaps — real, not hidden:**
 
+- **Frontend not yet wired to the scope/RFI/analyze endpoints above** — the
+  backend is done and verified via curl, but there's no scope UI, RFI
+  review screen, or review-panel "Analyze" button in `apps/web` yet
+  (in progress in a separate session — see the note at the top of this
+  file). Until that lands, those endpoints are only reachable via direct
+  API calls.
 - **Controls, Findings, Workpapers, Reports, Integrations, Settings** exist
   only as disabled sidebar entries ("soon"). None of these have a data
   model, a backend, or even mock data behind them — deliberately, since
